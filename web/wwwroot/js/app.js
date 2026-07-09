@@ -12,18 +12,16 @@ function actionClass(action) {
   return "act-observe"; // OBSERVE / HOLD / OBSERVE
 }
 
-// Kurzlabel fürs UI — die Original-Action aus score.py bleibt unverändert
-// in DB/API/Tooltip, hier wird nur die Anzeige eingedampft.
+// Kurzlabel fürs UI: alles auf BUY / HOLD / SELL eingedampft. Die Nuance
+// transportiert die Badge-Farbe (actionClass), die Original-Action aus
+// score.py bleibt unverändert in DB/API/Tooltip.
 function actionLabel(action) {
   if (!action) return null;
-  if (action.startsWith("RE-ENTRY")) return "RE-ENTRY";
-  if (action.startsWith("HOLD (ride")) return "HOLD";
-  if (action.startsWith("TACTICAL")) return "REBOUND";
-  if (action.startsWith("WAIT")) return "WAIT";
-  if (action.startsWith("HOLD (under")) return "REVIEW";
-  if (action.startsWith("EXIT")) return "EXIT";
-  if (action.startsWith("STAY OUT")) return "AVOID";
-  return "OBSERVE"; // OBSERVE / HOLD / OBSERVE
+  if (action.startsWith("RE-ENTRY")) return "BUY";
+  if (action.startsWith("TACTICAL")) return "BUY";      // Gegentrend, teal
+  if (action.startsWith("EXIT")) return "SELL";
+  if (action.startsWith("STAY OUT")) return "SELL";     // meiden, grau-rot
+  return "HOLD"; // HOLD (ride/under review), WAIT, OBSERVE
 }
 
 function fmtPrice(v) {
