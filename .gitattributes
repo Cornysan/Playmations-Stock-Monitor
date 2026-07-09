@@ -1,0 +1,7 @@
+# Server-/Skriptdateien immer mit LF committen, egal auf welchem OS entwickelt
+# wird — sonst brechen sie auf dem Linux-Server (bad interpreter: ^M).
+*.sh              text eol=lf
+*.py              text eol=lf
+deploy/Caddyfile  text eol=lf
+deploy/*.service  text eol=lf
+*.yml             text eol=lf
