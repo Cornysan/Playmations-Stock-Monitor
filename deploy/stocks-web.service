@@ -1,0 +1,16 @@
+[Unit]
+Description=stocks.playmations.com web (Kestrel)
+After=network.target
+
+[Service]
+User=stocks
+WorkingDirectory=/var/www/stocks/web
+ExecStart=/usr/bin/dotnet /var/www/stocks/web/StocksWeb.dll
+Restart=always
+RestartSec=5
+Environment=ASPNETCORE_URLS=http://127.0.0.1:5000
+Environment=DOTNET_ENVIRONMENT=Production
+Environment=DbPath=/var/lib/stocks/stocks.db
+
+[Install]
+WantedBy=multi-user.target

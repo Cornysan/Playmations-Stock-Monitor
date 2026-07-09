@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "stocks-web",
+      "runtimeExecutable": "C:\\Program Files\\dotnet\\dotnet.exe",
+      "runtimeArgs": ["run", "--project", "web", "--no-launch-profile", "--urls", "http://127.0.0.1:5000"],
+      "port": 5000
+    }
+  ]
+}

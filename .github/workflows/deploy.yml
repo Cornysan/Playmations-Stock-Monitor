@@ -1,0 +1,22 @@
+name: deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: self-hosted   # Runner läuft auf dem Zielserver
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Publish web
+        run: dotnet publish web/StocksWeb.csproj -c Release -o /var/www/stocks/web
+
+      - name: Sync worker
+        run: |
+          rsync -a --delete --exclude '__pycache__' worker/ /var/www/stocks/worker/
+          /var/www/stocks/venv/bin/pip install --quiet -r worker/requirements.txt
+
+      - name: Restart services
+        run: sudo /usr/bin/systemctl restart stocks-web stocks-worker

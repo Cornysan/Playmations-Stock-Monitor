@@ -91,6 +91,24 @@ def run_macro(con, as_of: str) -> int | None:
     return result.pillar_score
 
 
+def analyze_symbols(con, rows, macro_score: int | None, as_of: str) -> None:
+    update_bars(con, [r["symbol"] for r in rows])
+    for row in rows:
+        sym = row["symbol"]
+        closes = db.closes(con, sym)
+        if len(closes) < 60:
+            log.warning("%s: only %d bars — skipping analysis", sym, len(closes))
+            continue
+        card = score.score_symbol(
+            closes,
+            macro_score=macro_score,
+            symbol=sym,
+            holding=bool(row["holding"]),
+        )
+        db.write_analysis(con, sym, as_of, card)
+        log.info("%s: %-28s total=%+d", sym, card["decision"]["action"], card["pillar_total"])
+
+
 def run_once(con, only: list[str] | None = None) -> None:
     as_of = now_iso()
     log.info("=== daily run %s ===", as_of)
@@ -102,25 +120,8 @@ def run_once(con, only: list[str] | None = None) -> None:
         if only:
             wanted = {s.upper() for s in only}
             rows = [r for r in rows if r["symbol"].upper() in wanted]
-        symbols = [r["symbol"] for r in rows]
-        log.info("analyzing %d symbols", len(symbols))
-
-        update_bars(con, symbols)
-
-        for row in rows:
-            sym = row["symbol"]
-            closes = db.closes(con, sym)
-            if len(closes) < 60:
-                log.warning("%s: only %d bars — skipping analysis", sym, len(closes))
-                continue
-            card = score.score_symbol(
-                closes,
-                macro_score=macro_score,
-                symbol=sym,
-                holding=bool(row["holding"]),
-            )
-            db.write_analysis(con, sym, as_of, card)
-            log.info("%s: %-28s total=%+d", sym, card["decision"]["action"], card["pillar_total"])
+        log.info("analyzing %d symbols", len(rows))
+        analyze_symbols(con, rows, macro_score, as_of)
 
         db.set_meta(con, "last_run_ok", as_of)
         log.info("=== run complete ===")
@@ -128,6 +129,31 @@ def run_once(con, only: list[str] | None = None) -> None:
         # Hard backoff: abort the whole run, keep last good data, try again next cycle.
         db.set_meta(con, "last_rate_limit", now_iso())
         log.error("rate limited by Yahoo — aborting run, last good data stays visible: %s", e)
+
+
+def catch_up(con) -> None:
+    """Analyze symbols added via the UI since the last run (no full re-run)."""
+    # Only recently added symbols: dead tickers from the seed would otherwise be
+    # retried every 15 minutes forever (the daily run still retries them once a day).
+    cutoff = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=48)).isoformat(timespec="seconds")
+    rows = con.execute(
+        """SELECT symbol, name, holding FROM watchlist w
+           WHERE enabled = 1 AND added_at >= ? AND NOT EXISTS
+             (SELECT 1 FROM analysis a WHERE a.symbol = w.symbol)""",
+        (cutoff,),
+    ).fetchall()
+    if not rows:
+        return
+    macro_row = con.execute(
+        "SELECT pillar_score FROM macro_snapshot ORDER BY as_of DESC LIMIT 1"
+    ).fetchone()
+    macro_score = macro_row["pillar_score"] if macro_row else None
+    log.info("catch-up: %d new symbol(s): %s",
+             len(rows), ", ".join(r["symbol"] for r in rows))
+    try:
+        analyze_symbols(con, rows, macro_score, now_iso())
+    except fetch.RateLimited as e:
+        log.error("rate limited during catch-up — will retry next cycle: %s", e)
 
 
 # ---------------------------------------------------------------------------
@@ -145,12 +171,17 @@ def next_run_time() -> dt.datetime:
 
 
 def loop(con) -> None:
-    log.info("loop mode: daily run at %s US/Eastern", config.DAILY_RUN_ET)
+    log.info("loop mode: daily run at %s US/Eastern, catch-up check every 15 min",
+             config.DAILY_RUN_ET)
     while True:
         target = next_run_time()
-        wait = (target - dt.datetime.now(target.tzinfo)).total_seconds()
-        log.info("next run at %s (in %.1f h)", target.isoformat(), wait / 3600)
-        time.sleep(max(wait, 1))
+        log.info("next full run at %s", target.isoformat())
+        while True:
+            remaining = (target - dt.datetime.now(target.tzinfo)).total_seconds()
+            if remaining <= 0:
+                break
+            time.sleep(min(remaining, 900))
+            catch_up(con)  # picks up symbols added via the UI in between
         run_once(con)
 
 

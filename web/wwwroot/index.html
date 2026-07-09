@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>stocks.playmations.com</title>
+  <link rel="stylesheet" href="/css/app.css">
+  <script src="/js/app.js"></script>
+  <script defer src="/js/alpine.min.js"></script>
+</head>
+<body>
+<div class="wrap" x-data="watchlistApp()" x-init="init()">
+
+  <header class="top">
+    <div class="logo">stocks<span>.</span>playmations<span>.</span>com</div>
+
+    <div class="macro-chip" x-cloak x-show="macro"
+         :title="macro ? 'Composite ' + macro.composite + ' · Stand ' + fmtAsOf(macro.as_of) : ''">
+      <span>Macro</span>
+      <b x-text="macro?.regime"></b>
+      <span class="score" :class="signClass(macro?.pillar_score)"
+            x-text="fmtSigned(macro?.pillar_score)"></span>
+    </div>
+
+    <div class="spacer"></div>
+
+    <div class="search">
+      <input type="text" placeholder="Symbol oder Name hinzufügen…" autocomplete="off"
+             x-model="query" @input.debounce.300ms="search()"
+             @keydown.escape="results = null" @focus="search()">
+      <div class="results" x-cloak x-show="results !== null" @click.outside="results = null">
+        <template x-for="r in results" :key="r.symbol">
+          <button @click="add(r)">
+            <span class="sym" x-text="r.symbol"></span>
+            <span x-text="r.name"></span>
+            <span class="exch" x-text="r.exchange"></span>
+          </button>
+        </template>
+        <div class="hint" x-show="results && results.length === 0">Keine Yahoo-Treffer.</div>
+        <div class="hint" x-show="adding" x-text="'Füge ' + adding + ' hinzu…'"></div>
+      </div>
+    </div>
+  </header>
+
+  <div class="loading" x-show="rows === null">Lade Watchlist…</div>
+
+  <table class="watch" x-cloak x-show="rows !== null">
+    <thead>
+      <tr>
+        <th @click="sortBy('symbol')">Ticker</th>
+        <th @click="sortBy('name')">Name</th>
+        <th class="num" @click="sortBy('last_price')">Preis</th>
+        <th @click="sortBy('action')">Action</th>
+        <th class="num" @click="sortBy('pillar_total')">Total</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      <template x-for="r in sorted()" :key="r.symbol">
+        <tr @click="window.location = '/symbol/' + encodeURIComponent(r.symbol)">
+          <td class="sym-cell">
+            <span class="hold-dot" x-show="r.holding" title="im Depot"></span><span x-text="r.symbol"></span>
+          </td>
+          <td class="name-cell" x-text="r.name || ''"></td>
+          <td class="num">
+            <span class="price" x-text="fmtPrice(r.last_price)"></span>
+            <span class="chg" :class="signClass(r.change_pct)" x-cloak x-show="r.change_pct != null"
+                  x-text="(r.change_pct > 0 ? '+' : '') + (r.change_pct ?? 0).toFixed(2) + '%'"></span>
+          </td>
+          <td>
+            <span class="badge" :class="actionClass(r.action)"
+                  :title="flagTooltip(r.flags)"
+                  x-text="r.action || (r.as_of ? '—' : 'wartet auf Analyse')"></span>
+          </td>
+          <td class="num">
+            <span class="total" :class="signClass(r.pillar_total)"
+                  x-text="r.pillar_total != null ? fmtSigned(r.pillar_total) : '·'"></span>
+          </td>
+          <td>
+            <button class="remove-btn" title="Von Watchlist entfernen"
+                    @click.stop="remove(r)">✕</button>
+          </td>
+        </tr>
+      </template>
+    </tbody>
+  </table>
+
+  <footer class="disclaimer">
+    Mechanische Auswertung eigener Formeln (Trend / Momentum / Macro) — keine Finanzberatung.
+    Kurse: Yahoo Finance, 1× täglich nach US-Close.
+  </footer>
+</div>
+
+<script>
+function watchlistApp() {
+  return {
+    rows: null,
+    macro: null,
+    results: null,
+    query: "",
+    adding: null,
+    sortKey: "symbol",
+    sortDir: 1,
+
+    async init() {
+      await Promise.all([this.loadList(), this.loadMacro()]);
+    },
+    async loadList() {
+      const resp = await fetch("/api/watchlist");
+      this.rows = await resp.json();
+    },
+    async loadMacro() {
+      const resp = await fetch("/api/macro");
+      if (resp.ok) this.macro = await resp.json();
+    },
+
+    sortBy(key) {
+      if (this.sortKey === key) this.sortDir *= -1;
+      else { this.sortKey = key; this.sortDir = key === "symbol" || key === "name" ? 1 : -1; }
+    },
+    sorted() {
+      if (!this.rows) return [];
+      const key = this.sortKey, dir = this.sortDir;
+      return [...this.rows].sort((a, b) => {
+        const va = a[key], vb = b[key];
+        if (va == null && vb == null) return 0;
+        if (va == null) return 1;          // nulls always last
+        if (vb == null) return -1;
+        return (va < vb ? -1 : va > vb ? 1 : 0) * dir;
+      });
+    },
+
+    async search() {
+      const q = this.query.trim();
+      if (q.length < 2) { this.results = null; return; }
+      const resp = await fetch("/api/symbols/search?q=" + encodeURIComponent(q));
+      this.results = resp.ok ? await resp.json() : [];
+    },
+    async add(r) {
+      this.adding = r.symbol;
+      const resp = await fetch("/api/watchlist", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ symbol: r.symbol }),
+      });
+      this.adding = null;
+      this.results = null;
+      this.query = "";
+      if (resp.ok) await this.loadList();
+      else alert((await resp.json()).error || "Hinzufügen fehlgeschlagen");
+    },
+    async remove(r) {
+      if (!confirm(r.symbol + " von der Watchlist entfernen?")) return;
+      const resp = await fetch("/api/watchlist/" + encodeURIComponent(r.symbol), { method: "DELETE" });
+      if (resp.ok) this.rows = this.rows.filter((x) => x.symbol !== r.symbol);
+    },
+  };
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,18 @@
+[Unit]
+Description=stocks.playmations.com worker (daily Yahoo fetch + analysis)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=stocks
+WorkingDirectory=/var/www/stocks/worker
+ExecStart=/var/www/stocks/venv/bin/python main.py loop
+Restart=always
+RestartSec=30
+Environment=STOCKS_DB=/var/lib/stocks/stocks.db
+Environment=PYTHONUNBUFFERED=1
+# FRED_API_KEY etc. — nicht ins Repo, nur auf dem Server:
+EnvironmentFile=-/etc/stocks/env
+
+[Install]
+WantedBy=multi-user.target
