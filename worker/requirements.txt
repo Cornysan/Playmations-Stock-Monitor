@@ -1,0 +1,2 @@
+yfinance>=0.2.66
+requests>=2.32

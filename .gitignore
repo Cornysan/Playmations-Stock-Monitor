@@ -1,0 +1,29 @@
+# Secrets / lokale Konfiguration
+.env
+appsettings.Production.json
+
+# Daten
+*.db
+*.db-wal
+*.db-shm
+data/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# .NET
+bin/
+obj/
+*.user
+publish/
+
+# Logs
+*.log
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.claude/settings.local.json
