@@ -4,8 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>stocks.playmations.com</title>
-  <link rel="stylesheet" href="/css/app.css">
-  <script src="/js/app.js"></script>
+  <link rel="stylesheet" href="/css/app.css?v=3">
+  <script src="/js/app.js?v=3"></script>
+  <script src="/js/lightweight-charts.standalone.production.js"></script>
   <script defer src="/js/alpine.min.js"></script>
 </head>
 <body>
@@ -44,41 +45,185 @@
 
   <div class="loading" x-show="rows === null">Lade Watchlist…</div>
 
-  <table class="watch" x-cloak x-show="rows !== null">
-    <thead>
-      <tr>
-        <th @click="sortBy('symbol')">Ticker</th>
-        <th class="name-col" @click="sortBy('name')">Name</th>
-        <th class="num" @click="sortBy('last_price')">Preis</th>
-        <th @click="sortBy('action')">Action</th>
-        <th></th>
-      </tr>
-    </thead>
-    <tbody>
-      <template x-for="r in sorted()" :key="r.symbol">
-        <tr @click="window.location = '/symbol/' + encodeURIComponent(r.symbol)">
-          <td class="sym-cell">
-            <span class="hold-dot" x-show="r.holding" title="im Depot"></span><span x-text="r.symbol"></span>
-          </td>
-          <td class="name-cell name-col" x-text="r.name || ''"></td>
-          <td class="num">
-            <span class="price" x-text="fmtPrice(r.last_price)"></span>
-            <span class="chg" :class="signClass(r.change_pct)" x-cloak x-show="r.change_pct != null"
-                  x-text="(r.change_pct > 0 ? '+' : '') + (r.change_pct ?? 0).toFixed(2) + '%'"></span>
-          </td>
-          <td>
-            <span class="badge" :class="actionClass(r.action)"
-                  :title="[r.action, flagTooltip(r.flags)].filter(Boolean).join('\n')"
-                  x-text="actionLabel(r.action) || (r.as_of ? '—' : 'no data')"></span>
-          </td>
-          <td>
-            <button class="remove-btn" title="Von Watchlist entfernen" x-cloak x-show="admin"
-                    @click.stop="remove(r)">✕</button>
-          </td>
-        </tr>
-      </template>
-    </tbody>
-  </table>
+  <div class="layout" x-cloak x-show="rows !== null">
+
+    <!-- ================= linke Spalte: Watchlist ================= -->
+    <div class="list-pane">
+      <table class="watch">
+        <thead>
+          <tr>
+            <th @click="sortBy('symbol')">Ticker</th>
+            <th class="num" @click="sortBy('last_price')">Preis</th>
+            <th @click="sortBy('action')">Action</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          <template x-for="r in sorted()" :key="r.symbol">
+            <tr @click="select(r)" :class="{ selected: r.symbol === symbol }">
+              <td class="sym-cell">
+                <span class="hold-dot" x-show="r.holding" title="im Depot"></span><span x-text="r.symbol"></span>
+                <div class="sub-name" x-text="r.name || ''"></div>
+              </td>
+              <td class="num">
+                <span class="price" x-text="fmtPrice(r.last_price)"></span>
+                <span class="chg" :class="signClass(r.change_pct)" x-cloak x-show="r.change_pct != null"
+                      x-text="(r.change_pct > 0 ? '+' : '') + (r.change_pct ?? 0).toFixed(2) + '%'"></span>
+              </td>
+              <td>
+                <span class="badge" :class="actionClass(r.action)"
+                      :title="[r.action, flagTooltip(r.flags)].filter(Boolean).join('\n')"
+                      x-text="actionLabel(r.action) || (r.as_of ? '—' : 'no data')"></span>
+              </td>
+              <td>
+                <button class="remove-btn" title="Von Watchlist entfernen" x-cloak x-show="admin"
+                        @click.stop="remove(r)">✕</button>
+              </td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- ================= rechte Spalte: Chart + Analyse ================= -->
+    <div class="detail-pane">
+      <div class="detail-placeholder" x-show="!symbol">Symbol in der Liste wählen…</div>
+
+      <div x-cloak x-show="symbol">
+        <div class="detail-head">
+          <h1 x-text="symbol"></h1>
+          <span class="full-name" x-text="analysis?.name || ''"></span>
+          <span class="big-price" x-text="fmtPrice(lastClose)"></span>
+        </div>
+
+        <div class="toggle-row" x-cloak x-show="analysis">
+          <button class="toggle" x-show="admin" :class="{ on: analysis?.holding }" @click="toggleHolding()"
+                  title="Umschalten: bin ich hier investiert?"></button>
+          <span x-text="analysis?.holding ? 'Im Depot (Holder-Framing)' : 'Nicht im Depot (Entry-Framing)'"></span>
+          <span class="stale" x-show="analysis" x-text="'· Analyse vom ' + fmtAsOf(analysis?.as_of)"></span>
+        </div>
+
+        <div class="banner" x-cloak x-show="analysis" :class="actionClass(analysis?.action)">
+          <div class="action-line" :title="analysis?.action" x-text="actionLabel(analysis?.action)"></div>
+          <div class="rationale" x-text="analysis?.rationale"></div>
+          <div class="framing" x-text="analysis?.framing"></div>
+        </div>
+        <div class="banner" x-cloak x-show="analysisMissing">
+          <div class="action-line">no data</div>
+          <div class="framing">Das Symbol wird beim nächsten Worker-Lauf analysiert.</div>
+        </div>
+
+        <div class="chart-card">
+          <div class="chart-toolbar">
+            <template x-for="r in ['3m','6m','1y']" :key="r">
+              <button class="range-btn" :class="{ active: range === r }"
+                      @click="range = r; loadChart()" x-text="r.toUpperCase()"></button>
+            </template>
+            <div class="legend">
+              <span><span class="key" style="background:#e3b341"></span>EMA20</span>
+              <span><span class="key" style="background:#39c5cf"></span>EMA50</span>
+              <span><span class="key" style="background:#a371f7"></span>EMA200</span>
+            </div>
+          </div>
+          <div id="chart"></div>
+        </div>
+
+        <template x-if="analysis">
+          <div>
+            <div class="acc">
+              <button @click="open.pillars = !open.pillars">
+                <span class="chev" :class="{ open: open.pillars }">▶</span> Pillars
+                <span class="summary"
+                      x-text="'Trend ' + fmtSigned(analysis.trend_score)
+                            + ' · Momentum ' + fmtSigned(analysis.momentum_score)
+                            + ' · Macro ' + fmtSigned(analysis.macro_score)
+                            + ' → Total ' + fmtSigned(analysis.pillar_total)"></span>
+              </button>
+              <div class="body" x-cloak x-show="open.pillars">
+                <div class="pillar-row">
+                  <span class="p-name">Trend</span>
+                  <span class="p-score" :class="signClass(analysis.trend_score)" x-text="fmtSigned(analysis.trend_score)"></span>
+                  <span class="p-detail" x-text="analysis.flags?.trend_detail"></span>
+                </div>
+                <div class="pillar-row">
+                  <span class="p-name">Momentum</span>
+                  <span class="p-score" :class="signClass(analysis.momentum_score)" x-text="fmtSigned(analysis.momentum_score)"></span>
+                  <span class="p-detail" x-text="analysis.flags?.momentum_detail"></span>
+                </div>
+                <div class="pillar-row">
+                  <span class="p-name">Macro-Sentiment</span>
+                  <span class="p-score" :class="signClass(analysis.macro_score)" x-text="fmtSigned(analysis.macro_score)"></span>
+                  <span class="p-detail" x-text="macro ? macro.regime + ' · Composite ' + macro.composite : 'injiziert aus macro_pillar.py'"></span>
+                </div>
+              </div>
+            </div>
+
+            <div class="acc">
+              <button @click="open.flags = !open.flags">
+                <span class="chev" :class="{ open: open.flags }">▶</span> Flags
+                <span class="summary" x-text="flagSummary()"></span>
+              </button>
+              <div class="body" x-cloak x-show="open.flags">
+                <div class="flag-group">
+                  <div class="fg-title">Exhaustion</div>
+                  <template x-for="f in analysis.flags?.exhaustion || []"><span class="flag exh" x-text="f"></span></template>
+                  <span class="flag-none" x-show="!(analysis.flags?.exhaustion || []).length">keine</span>
+                </div>
+                <div class="flag-group">
+                  <div class="fg-title">Bearish</div>
+                  <template x-for="f in analysis.flags?.bearish || []"><span class="flag bear" x-text="f"></span></template>
+                  <span class="flag-none" x-show="!(analysis.flags?.bearish || []).length">keine</span>
+                </div>
+                <div class="flag-group">
+                  <div class="fg-title">Rebound</div>
+                  <template x-for="f in analysis.flags?.rebound || []"><span class="flag reb" x-text="f"></span></template>
+                  <span class="flag-none" x-show="!(analysis.flags?.rebound || []).length">keine</span>
+                </div>
+                <div class="flag-group">
+                  <div class="fg-title">Struktur</div>
+                  <span class="flag bear" x-show="analysis.flags?.death_cross">aktives Death-Cross (EMA50&lt;EMA200, Preis&lt;EMA50)</span>
+                  <span class="flag" x-text="'Stretch über EMA20: ' + (analysis.flags?.stretch_pct ?? '?') + '%'"></span>
+                </div>
+              </div>
+            </div>
+
+            <div class="acc">
+              <button @click="open.ind = !open.ind">
+                <span class="chev" :class="{ open: open.ind }">▶</span> Rohindikatoren
+                <span class="summary" x-text="analysis.indicators ? analysis.indicators.n_bars + ' Bars' : ''"></span>
+              </button>
+              <div class="body" x-cloak x-show="open.ind">
+                <table class="kv">
+                  <template x-for="[k, v] in indicatorRows()" :key="k">
+                    <tr><td x-text="k"></td><td x-text="v"></td></tr>
+                  </template>
+                </table>
+              </div>
+            </div>
+
+            <div class="acc" x-show="macro">
+              <button @click="open.macro = !open.macro">
+                <span class="chev" :class="{ open: open.macro }">▶</span> Macro-Snapshot
+                <span class="summary" x-text="macro ? macro.pillar_label : ''"></span>
+              </button>
+              <div class="body" x-cloak x-show="open.macro">
+                <template x-for="c in macro?.components || []" :key="c.ratio">
+                  <div class="macro-comp">
+                    <span class="mc-sig" :class="signClass(c.signal)" x-text="c.signal != null ? (c.signal > 0 ? '+' : '') + c.signal.toFixed(2) : '—'"></span>
+                    <span class="mc-ratio" x-text="c.ratio"></span>
+                    <span class="mc-detail" x-text="c.available ? c.detail : 'keine Daten'"></span>
+                  </div>
+                </template>
+                <div class="flag-none" style="margin-top:8px" x-show="(macro?.notes || []).length">
+                  <template x-for="n in macro?.notes || []"><div x-text="'Hinweis: ' + n"></div></template>
+                </div>
+              </div>
+            </div>
+          </div>
+        </template>
+      </div>
+    </div>
+  </div>
 
   <footer class="disclaimer">
     <span>
@@ -93,6 +238,8 @@
 <script>
 function watchlistApp() {
   return {
+    ...detailState(),
+
     rows: null,
     macro: null,
     results: null,
@@ -101,14 +248,38 @@ function watchlistApp() {
     admin: false,
     sortKey: "symbol",
     sortDir: 1,
+    isDesktop: window.matchMedia("(min-width: 1000px)").matches,
 
     async init() {
       await Promise.all([this.loadList(), this.loadMacro(), this.loadMe()]);
+      if (this.isDesktop && this.rows?.length) {
+        const pre = new URLSearchParams(location.search).get("s");
+        const hit = pre && this.rows.find((r) => r.symbol.toUpperCase() === pre.toUpperCase());
+        await this.show((hit || this.sorted()[0]).symbol);
+      }
+    },
+    async loadList() {
+      const resp = await fetch("/api/watchlist");
+      this.rows = await resp.json();
+    },
+    async loadMacro() {
+      const resp = await fetch("/api/macro");
+      if (resp.ok) this.macro = await resp.json();
     },
     async loadMe() {
       const resp = await fetch("/api/me");
       if (resp.ok) this.admin = (await resp.json()).admin;
     },
+
+    select(r) {
+      if (!this.isDesktop) {
+        window.location = "/symbol/" + encodeURIComponent(r.symbol);
+        return;
+      }
+      history.replaceState(null, "", "/?s=" + encodeURIComponent(r.symbol));
+      this.show(r.symbol);
+    },
+
     async login() {
       const pw = prompt("Admin-Passwort:");
       if (!pw) return;
@@ -124,18 +295,10 @@ function watchlistApp() {
       await fetch("/api/logout", { method: "POST" });
       this.admin = false;
     },
-    async loadList() {
-      const resp = await fetch("/api/watchlist");
-      this.rows = await resp.json();
-    },
-    async loadMacro() {
-      const resp = await fetch("/api/macro");
-      if (resp.ok) this.macro = await resp.json();
-    },
 
     sortBy(key) {
       if (this.sortKey === key) this.sortDir *= -1;
-      else { this.sortKey = key; this.sortDir = key === "symbol" || key === "name" ? 1 : -1; }
+      else { this.sortKey = key; this.sortDir = key === "symbol" ? 1 : -1; }
     },
     sorted() {
       if (!this.rows) return [];
@@ -165,13 +328,22 @@ function watchlistApp() {
       this.adding = null;
       this.results = null;
       this.query = "";
-      if (resp.ok) await this.loadList();
-      else alert((await resp.json()).error || "Hinzufügen fehlgeschlagen");
+      if (resp.ok) {
+        await this.loadList();
+        const added = await resp.json().catch(() => null);
+        if (this.isDesktop && added?.symbol) this.select({ symbol: added.symbol });
+      } else {
+        alert((await resp.json()).error || "Hinzufügen fehlgeschlagen");
+      }
     },
     async remove(r) {
       if (!confirm(r.symbol + " von der Watchlist entfernen?")) return;
       const resp = await fetch("/api/watchlist/" + encodeURIComponent(r.symbol), { method: "DELETE" });
-      if (resp.ok) this.rows = this.rows.filter((x) => x.symbol !== r.symbol);
+      if (resp.ok) {
+        this.rows = this.rows.filter((x) => x.symbol !== r.symbol);
+        if (this.symbol === r.symbol && this.isDesktop && this.rows.length)
+          this.select({ symbol: this.sorted()[0].symbol });
+      }
     },
   };
 }

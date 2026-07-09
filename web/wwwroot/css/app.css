@@ -68,8 +68,28 @@ header.top {
 .search .results .exch { margin-left: auto; color: var(--muted); font-size: 11px; }
 .search .hint { padding: 8px 12px; color: var(--muted); font-size: 12px; }
 
+/* ---- split layout (desktop) ------------------------------------------- */
+.layout { display: grid; grid-template-columns: minmax(330px, 400px) minmax(0, 1fr); gap: 22px; align-items: start; }
+.list-pane {
+  max-height: calc(100vh - 96px);
+  overflow-y: auto;
+  position: sticky; top: 14px;
+  scrollbar-width: thin; scrollbar-color: #2a313a transparent;
+}
+.list-pane::-webkit-scrollbar { width: 8px; }
+.list-pane::-webkit-scrollbar-thumb { background: #2a313a; border-radius: 4px; }
+/* kompakte Zellen, damit die schmale Spalte nicht horizontal scrollt */
+.list-pane table.watch th, .list-pane table.watch td { padding: 8px 7px; }
+.list-pane table.watch td { font-size: 13.5px; }
+.list-pane .chg { display: block; margin-left: 0; }
+.list-pane .badge { font-size: 11px; padding: 3px 8px; }
+.list-pane .remove-btn { padding: 2px 3px; }
+.detail-pane { min-width: 0; }
+.detail-placeholder { color: var(--muted); padding: 60px 0; text-align: center; }
+
 /* ---- watchlist table -------------------------------------------------- */
 table.watch { width: 100%; border-collapse: collapse; }
+.list-pane table.watch th { position: sticky; top: 0; background: var(--bg); z-index: 2; }
 table.watch th {
   text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .8px;
   color: var(--muted); font-weight: 600; padding: 6px 10px;
@@ -83,8 +103,13 @@ table.watch td {
 }
 table.watch tbody tr { cursor: pointer; }
 table.watch tbody tr:hover { background: #151b23; }
+table.watch tbody tr.selected { background: #1a212b; box-shadow: inset 3px 0 0 var(--up); }
 .sym-cell { font-family: var(--mono); font-weight: 600; }
-.name-cell { color: var(--muted); max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
+.sub-name {
+  font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-weight: 400; font-size: 11.5px; color: var(--muted);
+  max-width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .price { font-family: var(--mono); }
 .chg { font-family: var(--mono); font-size: 12px; margin-left: 8px; }
 .chg.pos { color: var(--up); }
@@ -100,7 +125,9 @@ table.watch tbody tr:hover { background: #151b23; }
 .remove-btn {
   background: none; border: 0; color: #444c56; cursor: pointer;
   font-size: 15px; padding: 2px 6px; border-radius: 5px; line-height: 1;
+  opacity: 0; transition: opacity .1s;
 }
+table.watch tbody tr:hover .remove-btn { opacity: 1; }
 .remove-btn:hover { color: var(--down); background: #1d232b; }
 
 /* ---- action badges ---------------------------------------------------- */
@@ -109,8 +136,8 @@ table.watch tbody tr:hover { background: #151b23; }
   font-size: 12px; font-weight: 600; letter-spacing: .2px; cursor: default;
 }
 .act-buy  { background: rgba(38,166,154,.20); color: #3ecfba; }
-.act-hold { background: rgba(139,148,158,.13); color: var(--muted); }
-.act-sell { background: rgba(239,83,80,.18); color: #f27b79; }
+.act-hold { background: rgba(230,237,243,.10); color: #dfe6ee; }
+.act-sell { background: rgba(239,83,80,.20); color: #f27b79; }
 .act-none { background: transparent; color: #444c56; }
 
 /* ---- detail page ------------------------------------------------------ */
@@ -206,6 +233,13 @@ footer.disclaimer a:hover { color: var(--muted); }
 .loading { color: var(--muted); padding: 30px 0; text-align: center; }
 .stale { color: var(--amber); font-size: 12px; }
 
+/* ---- schmaler als Desktop: einspaltig, Detail per Seitenwechsel -------- */
+@media (max-width: 999px) {
+  .layout { display: block; }
+  .list-pane { max-height: none; overflow: visible; position: static; }
+  .detail-pane { display: none; }
+}
+
 /* ---- mobile ----------------------------------------------------------- */
 @media (max-width: 640px) {
   body { font-size: 14px; }
@@ -215,8 +249,6 @@ footer.disclaimer a:hover { color: var(--muted); }
   .logo { font-size: 15px; }
   .search { flex: 1 1 100%; min-width: 0; order: 10; }
 
-  /* Namensspalte weglassen — Ticker + Preis + Badge reichen auf 375px */
-  .name-col { display: none; }
   table.watch th, table.watch td { padding: 8px 6px; }
   table.watch td { font-size: 13px; }
   .chg { display: block; margin-left: 0; }
