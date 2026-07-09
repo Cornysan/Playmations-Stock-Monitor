@@ -1,27 +1,21 @@
 // Shared helpers — pure presentation, no signal math happens in the frontend.
 
-// Action → badge class (mapping from PROJEKTPLAN §8.1)
-function actionClass(action) {
-  if (!action) return "act-none";
-  if (action.startsWith("RE-ENTRY")) return "act-strong-buy";
-  if (action.startsWith("HOLD (ride")) return "act-buy";
-  if (action.startsWith("TACTICAL")) return "act-tactical";
-  if (action.startsWith("WAIT") || action.startsWith("HOLD (under")) return "act-wait";
-  if (action.startsWith("EXIT")) return "act-exit";
-  if (action.startsWith("STAY OUT")) return "act-avoid";
-  return "act-observe"; // OBSERVE / HOLD / OBSERVE
-}
-
-// Kurzlabel fürs UI: alles auf BUY / HOLD / SELL eingedampft. Die Nuance
-// transportiert die Badge-Farbe (actionClass), die Original-Action aus
-// score.py bleibt unverändert in DB/API/Tooltip.
+// Kurzlabel fürs UI: alles auf BUY / HOLD / SELL eingedampft. Die
+// Original-Action aus score.py bleibt unverändert in DB/API/Tooltip.
 function actionLabel(action) {
   if (!action) return null;
   if (action.startsWith("RE-ENTRY")) return "BUY";
-  if (action.startsWith("TACTICAL")) return "BUY";      // Gegentrend, teal
+  if (action.startsWith("TACTICAL")) return "BUY";      // Gegentrend-Rebound
   if (action.startsWith("EXIT")) return "SELL";
-  if (action.startsWith("STAY OUT")) return "SELL";     // meiden, grau-rot
+  if (action.startsWith("STAY OUT")) return "SELL";     // meiden
   return "HOLD"; // HOLD (ride/under review), WAIT, OBSERVE
+}
+
+// Badge-/Banner-Farbe: BUY grün, HOLD grau, SELL rot.
+function actionClass(action) {
+  const label = actionLabel(action);
+  if (!label) return "act-none";
+  return { BUY: "act-buy", HOLD: "act-hold", SELL: "act-sell" }[label];
 }
 
 function fmtPrice(v) {

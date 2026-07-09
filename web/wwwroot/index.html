@@ -69,7 +69,7 @@
           <td>
             <span class="badge" :class="actionClass(r.action)"
                   :title="[r.action, flagTooltip(r.flags)].filter(Boolean).join('\n')"
-                  x-text="actionLabel(r.action) || (r.as_of ? '—' : 'wartet auf Analyse')"></span>
+                  x-text="actionLabel(r.action) || (r.as_of ? '—' : 'no data')"></span>
           </td>
           <td>
             <button class="remove-btn" title="Von Watchlist entfernen" x-cloak x-show="admin"
