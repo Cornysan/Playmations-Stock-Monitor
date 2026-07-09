@@ -12,6 +12,20 @@ function actionClass(action) {
   return "act-observe"; // OBSERVE / HOLD / OBSERVE
 }
 
+// Kurzlabel fürs UI — die Original-Action aus score.py bleibt unverändert
+// in DB/API/Tooltip, hier wird nur die Anzeige eingedampft.
+function actionLabel(action) {
+  if (!action) return null;
+  if (action.startsWith("RE-ENTRY")) return "RE-ENTRY";
+  if (action.startsWith("HOLD (ride")) return "HOLD";
+  if (action.startsWith("TACTICAL")) return "REBOUND";
+  if (action.startsWith("WAIT")) return "WAIT";
+  if (action.startsWith("HOLD (under")) return "REVIEW";
+  if (action.startsWith("EXIT")) return "EXIT";
+  if (action.startsWith("STAY OUT")) return "AVOID";
+  return "OBSERVE"; // OBSERVE / HOLD / OBSERVE
+}
+
 function fmtPrice(v) {
   if (v == null) return "—";
   const abs = Math.abs(v);

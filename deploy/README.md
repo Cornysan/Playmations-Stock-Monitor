@@ -6,10 +6,15 @@ GitHub-Actions-Runner bei jedem Push auf `main`.
 
 ## 1. Pakete
 
+Caddy, rsync, git und Python 3.12 sind auf Ubuntu 24.04 bereits vorhanden.
+Fehlt nur das .NET-10-SDK (nötig, weil auf dem Server gebaut wird):
+
 ```bash
-sudo apt install caddy rsync python3.11-venv
-# .NET 10 Runtime + SDK (SDK nötig, weil der Runner auf dem Server baut):
-# https://learn.microsoft.com/dotnet/core/install/linux
+# Microsoft-Paketquelle einbinden, dann SDK installieren
+wget https://packages.microsoft.com/config/ubuntu/24.04/packages-microsoft-prod.deb -O /tmp/ms.deb
+sudo dpkg -i /tmp/ms.deb
+sudo apt update && sudo apt install -y dotnet-sdk-10.0
+sudo apt install -y python3.12-venv   # falls venv-Modul fehlt
 ```
 
 ## 2. Nutzer & Verzeichnisse
@@ -17,7 +22,7 @@ sudo apt install caddy rsync python3.11-venv
 ```bash
 sudo useradd -r -m -d /var/www/stocks -s /usr/sbin/nologin stocks
 sudo mkdir -p /var/www/stocks/{web,worker} /var/lib/stocks /etc/stocks
-sudo python3.11 -m venv /var/www/stocks/venv
+sudo python3.12 -m venv /var/www/stocks/venv
 sudo chown -R stocks:stocks /var/www/stocks /var/lib/stocks
 ```
 
@@ -26,7 +31,10 @@ sudo chown -R stocks:stocks /var/www/stocks /var/lib/stocks
 ```bash
 # /etc/stocks/env
 FRED_API_KEY=...        # optional, für den 10Y-2Y-Spread
+AdminPassword=...       # Admin-Login der Web-App (ohne: reiner View-Modus)
 ```
+
+Nach Änderungen an dieser Datei: `systemctl restart stocks-web stocks-worker`.
 
 ## 4. Dienste & Proxy
 
@@ -34,8 +42,14 @@ FRED_API_KEY=...        # optional, für den 10Y-2Y-Spread
 sudo cp deploy/stocks-web.service deploy/stocks-worker.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now stocks-web stocks-worker
+```
 
-sudo cp deploy/Caddyfile /etc/caddy/Caddyfile   # bzw. Block in bestehende Caddyfile mergen
+Caddy läuft auf diesem Server bereits (serviert andere Seiten) — **nicht** die
+`/etc/caddy/Caddyfile` überschreiben, sondern den Block aus `deploy/Caddyfile`
+ans Ende der bestehenden Datei anhängen:
+
+```bash
+cat deploy/Caddyfile | sudo tee -a /etc/caddy/Caddyfile
 sudo systemctl reload caddy
 ```
 

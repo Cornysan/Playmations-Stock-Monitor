@@ -30,7 +30,7 @@
   </div>
 
   <div class="toggle-row" x-cloak x-show="analysis">
-    <button class="toggle" :class="{ on: analysis?.holding }" @click="toggleHolding()"
+    <button class="toggle" x-show="admin" :class="{ on: analysis?.holding }" @click="toggleHolding()"
             title="Umschalten: bin ich hier investiert?"></button>
     <span x-text="analysis?.holding ? 'Im Depot (Holder-Framing)' : 'Nicht im Depot (Entry-Framing)'"></span>
     <span class="stale" x-show="analysis" x-text="'· Analyse vom ' + fmtAsOf(analysis?.as_of)"></span>
@@ -38,7 +38,7 @@
 
   <!-- Action banner -->
   <div class="banner" x-cloak x-show="analysis" :class="actionClass(analysis?.action)">
-    <div class="action-line" x-text="analysis?.action"></div>
+    <div class="action-line" :title="analysis?.action" x-text="actionLabel(analysis?.action)"></div>
     <div class="rationale" x-text="analysis?.rationale"></div>
     <div class="framing" x-text="analysis?.framing"></div>
   </div>
@@ -172,13 +172,18 @@ function symbolApp() {
     macro: null,
     range: "1y",
     lastClose: null,
+    admin: false,
     open: { pillars: false, flags: false, ind: false, macro: false },
     chart: null,
     series: null,
 
     async init() {
       document.title = this.symbol + " · stocks.playmations.com";
-      await Promise.all([this.loadAnalysis(), this.loadMacro(), this.loadChart()]);
+      await Promise.all([this.loadAnalysis(), this.loadMacro(), this.loadChart(), this.loadMe()]);
+    },
+    async loadMe() {
+      const resp = await fetch("/api/me");
+      if (resp.ok) this.admin = (await resp.json()).admin;
     },
     async loadAnalysis() {
       const resp = await fetch("/api/symbols/" + encodeURIComponent(this.symbol) + "/analysis");

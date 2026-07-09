@@ -24,7 +24,7 @@
 
     <div class="spacer"></div>
 
-    <div class="search">
+    <div class="search" x-cloak x-show="admin">
       <input type="text" placeholder="Symbol oder Name hinzufügen…" autocomplete="off"
              x-model="query" @input.debounce.300ms="search()"
              @keydown.escape="results = null" @focus="search()">
@@ -48,10 +48,9 @@
     <thead>
       <tr>
         <th @click="sortBy('symbol')">Ticker</th>
-        <th @click="sortBy('name')">Name</th>
+        <th class="name-col" @click="sortBy('name')">Name</th>
         <th class="num" @click="sortBy('last_price')">Preis</th>
         <th @click="sortBy('action')">Action</th>
-        <th class="num" @click="sortBy('pillar_total')">Total</th>
         <th></th>
       </tr>
     </thead>
@@ -61,7 +60,7 @@
           <td class="sym-cell">
             <span class="hold-dot" x-show="r.holding" title="im Depot"></span><span x-text="r.symbol"></span>
           </td>
-          <td class="name-cell" x-text="r.name || ''"></td>
+          <td class="name-cell name-col" x-text="r.name || ''"></td>
           <td class="num">
             <span class="price" x-text="fmtPrice(r.last_price)"></span>
             <span class="chg" :class="signClass(r.change_pct)" x-cloak x-show="r.change_pct != null"
@@ -69,15 +68,11 @@
           </td>
           <td>
             <span class="badge" :class="actionClass(r.action)"
-                  :title="flagTooltip(r.flags)"
-                  x-text="r.action || (r.as_of ? '—' : 'wartet auf Analyse')"></span>
-          </td>
-          <td class="num">
-            <span class="total" :class="signClass(r.pillar_total)"
-                  x-text="r.pillar_total != null ? fmtSigned(r.pillar_total) : '·'"></span>
+                  :title="[r.action, flagTooltip(r.flags)].filter(Boolean).join('\n')"
+                  x-text="actionLabel(r.action) || (r.as_of ? '—' : 'wartet auf Analyse')"></span>
           </td>
           <td>
-            <button class="remove-btn" title="Von Watchlist entfernen"
+            <button class="remove-btn" title="Von Watchlist entfernen" x-cloak x-show="admin"
                     @click.stop="remove(r)">✕</button>
           </td>
         </tr>
@@ -86,8 +81,12 @@
   </table>
 
   <footer class="disclaimer">
-    Mechanische Auswertung eigener Formeln (Trend / Momentum / Macro) — keine Finanzberatung.
-    Kurse: Yahoo Finance, 1× täglich nach US-Close.
+    <span>
+      Mechanische Auswertung eigener Formeln (Trend / Momentum / Macro) — keine Finanzberatung.
+      Kurse: Yahoo Finance, 1× täglich nach US-Close.
+    </span>
+    <a href="#" @click.prevent="admin ? logout() : login()"
+       x-text="admin ? 'Logout' : 'Admin'"></a>
   </footer>
 </div>
 
@@ -99,11 +98,31 @@ function watchlistApp() {
     results: null,
     query: "",
     adding: null,
+    admin: false,
     sortKey: "symbol",
     sortDir: 1,
 
     async init() {
-      await Promise.all([this.loadList(), this.loadMacro()]);
+      await Promise.all([this.loadList(), this.loadMacro(), this.loadMe()]);
+    },
+    async loadMe() {
+      const resp = await fetch("/api/me");
+      if (resp.ok) this.admin = (await resp.json()).admin;
+    },
+    async login() {
+      const pw = prompt("Admin-Passwort:");
+      if (!pw) return;
+      const resp = await fetch("/api/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password: pw }),
+      });
+      if (resp.ok) this.admin = true;
+      else alert(resp.status === 401 ? "Falsches Passwort." : "Login nicht möglich (kein Admin-Passwort konfiguriert?).");
+    },
+    async logout() {
+      await fetch("/api/logout", { method: "POST" });
+      this.admin = false;
     },
     async loadList() {
       const resp = await fetch("/api/watchlist");

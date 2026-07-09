@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Caching.Memory;
@@ -78,6 +80,71 @@ double?[] EmaSeries(double[] values, int period)
     }
     return output;
 }
+
+// --------------------------------------------------------------------------
+// Admin auth — ein Passwort (Config "AdminPassword", z. B. aus /etc/stocks/env),
+// HMAC-signiertes Cookie mit Ablauf. Ohne konfiguriertes Passwort bleiben alle
+// mutierenden Endpunkte gesperrt (View-only).
+// --------------------------------------------------------------------------
+
+var adminPassword = app.Configuration["AdminPassword"];
+var adminKey = string.IsNullOrEmpty(adminPassword)
+    ? null
+    : SHA256.HashData(Encoding.UTF8.GetBytes("stocks-admin-v1:" + adminPassword));
+if (adminKey is null)
+    app.Logger.LogWarning("Kein AdminPassword konfiguriert — App läuft im reinen View-Modus.");
+
+const string AdminCookie = "stocks_admin";
+
+string MakeAdminToken()
+{
+    var exp = DateTimeOffset.UtcNow.AddDays(30).ToUnixTimeSeconds();
+    var sig = Convert.ToHexString(HMACSHA256.HashData(adminKey!, Encoding.UTF8.GetBytes("admin:" + exp)));
+    return exp + "." + sig;
+}
+
+bool IsAdmin(HttpRequest request)
+{
+    if (adminKey is null || request.Cookies[AdminCookie] is not string token) return false;
+    var parts = token.Split('.');
+    if (parts.Length != 2 || !long.TryParse(parts[0], out var exp)) return false;
+    if (exp < DateTimeOffset.UtcNow.ToUnixTimeSeconds()) return false;
+    var expected = Convert.ToHexString(HMACSHA256.HashData(adminKey, Encoding.UTF8.GetBytes("admin:" + parts[0])));
+    return CryptographicOperations.FixedTimeEquals(
+        Encoding.ASCII.GetBytes(expected), Encoding.ASCII.GetBytes(parts[1].ToUpperInvariant()));
+}
+
+app.MapGet("/api/me", (HttpRequest request) => Results.Json(new { admin = IsAdmin(request) }));
+
+app.MapPost("/api/login", async (HttpRequest request, HttpResponse response) =>
+{
+    if (adminKey is null)
+        return Results.Json(new { error = "kein AdminPassword konfiguriert" }, statusCode: 503);
+    var body = await JsonSerializer.DeserializeAsync<JsonElement>(request.Body);
+    var pw = body.TryGetProperty("password", out var p) ? p.GetString() : null;
+    var ok = pw is not null && CryptographicOperations.FixedTimeEquals(
+        SHA256.HashData(Encoding.UTF8.GetBytes(pw)),
+        SHA256.HashData(Encoding.UTF8.GetBytes(adminPassword!)));
+    if (!ok)
+    {
+        await Task.Delay(500); // stumpfes Bruteforce-Bremsen
+        return Results.Unauthorized();
+    }
+    response.Cookies.Append(AdminCookie, MakeAdminToken(), new CookieOptions
+    {
+        HttpOnly = true,
+        SameSite = SameSiteMode.Strict,
+        MaxAge = TimeSpan.FromDays(30),
+        Path = "/",
+    });
+    return Results.Json(new { admin = true });
+});
+
+app.MapPost("/api/logout", (HttpResponse response) =>
+{
+    response.Cookies.Delete(AdminCookie);
+    return Results.Json(new { admin = false });
+});
 
 // --------------------------------------------------------------------------
 // Yahoo symbol search (shared by autocomplete + watchlist validation)
@@ -228,6 +295,7 @@ app.MapGet("/api/symbols/search", async (string? q) =>
 
 app.MapPost("/api/watchlist", async (HttpRequest request) =>
 {
+    if (!IsAdmin(request)) return Results.Unauthorized();
     var body = await JsonSerializer.DeserializeAsync<JsonElement>(request.Body);
     var symbol = body.TryGetProperty("symbol", out var s) ? s.GetString()?.Trim() : null;
     if (string.IsNullOrEmpty(symbol))
@@ -253,8 +321,9 @@ app.MapPost("/api/watchlist", async (HttpRequest request) =>
         statusCode: StatusCodes.Status201Created);
 });
 
-app.MapDelete("/api/watchlist/{symbol}", (string symbol) =>
+app.MapDelete("/api/watchlist/{symbol}", (string symbol, HttpRequest request) =>
 {
+    if (!IsAdmin(request)) return Results.Unauthorized();
     // Soft delete: bars/analysis history stays, symbol vanishes from UI + worker runs.
     var n = Execute("UPDATE watchlist SET enabled = 0 WHERE symbol = @s",
         ("@s", symbol.ToUpperInvariant()));
@@ -263,6 +332,7 @@ app.MapDelete("/api/watchlist/{symbol}", (string symbol) =>
 
 app.MapPatch("/api/watchlist/{symbol}", async (string symbol, HttpRequest request) =>
 {
+    if (!IsAdmin(request)) return Results.Unauthorized();
     var body = await JsonSerializer.DeserializeAsync<JsonElement>(request.Body);
     if (!body.TryGetProperty("holding", out var h))
         return Results.BadRequest(new { error = "holding required" });

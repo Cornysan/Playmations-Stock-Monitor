@@ -204,6 +204,45 @@ table.kv td:last-child { text-align: right; }
 footer.disclaimer {
   margin-top: 32px; padding-top: 14px; border-top: 1px solid var(--border);
   color: #444c56; font-size: 12px;
+  display: flex; gap: 16px; justify-content: space-between; align-items: baseline;
 }
+footer.disclaimer a { color: #444c56; }
+footer.disclaimer a:hover { color: var(--muted); }
 .loading { color: var(--muted); padding: 30px 0; text-align: center; }
 .stale { color: var(--amber); font-size: 12px; }
+
+/* ---- mobile ----------------------------------------------------------- */
+@media (max-width: 640px) {
+  body { font-size: 14px; }
+  .wrap { padding: 0 10px 36px; }
+
+  header.top { gap: 10px; padding: 12px 0 10px; }
+  .logo { font-size: 15px; }
+  .search { flex: 1 1 100%; min-width: 0; order: 10; }
+
+  /* Namensspalte weglassen — Ticker + Preis + Badge reichen auf 375px */
+  .name-col { display: none; }
+  table.watch th, table.watch td { padding: 8px 6px; }
+  table.watch td { font-size: 13px; }
+  .chg { display: block; margin-left: 0; }
+  .badge { font-size: 11px; padding: 3px 8px; }
+
+  .detail-head { gap: 8px; margin: 10px 0 4px; }
+  .detail-head h1 { font-size: 20px; }
+  .detail-head .big-price { font-size: 17px; }
+  .banner { padding: 11px 12px; }
+  .banner .action-line { font-size: 15px; }
+
+  #chart { height: 280px; }
+  .legend { display: none; }
+  .chart-card { padding: 8px; }
+
+  .acc > button { padding: 11px 12px; font-size: 13px; }
+  .acc .summary { display: none; }   /* zu lang für schmale Screens */
+  .acc .body { padding: 4px 12px 12px; }
+  .pillar-row { flex-wrap: wrap; row-gap: 2px; }
+  .pillar-row .p-name { min-width: 110px; }
+  .macro-comp { flex-wrap: wrap; }
+
+  footer.disclaimer { flex-direction: column; gap: 6px; }
+}

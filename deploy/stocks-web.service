@@ -11,6 +11,8 @@ RestartSec=5
 Environment=ASPNETCORE_URLS=http://127.0.0.1:5000
 Environment=DOTNET_ENVIRONMENT=Production
 Environment=DbPath=/var/lib/stocks/stocks.db
+# AdminPassword etc. — nicht ins Repo, nur auf dem Server:
+EnvironmentFile=-/etc/stocks/env
 
 [Install]
 WantedBy=multi-user.target

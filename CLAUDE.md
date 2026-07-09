@@ -21,8 +21,9 @@ Selbstgehostetes Stock-Analyse-Dashboard. Voller Kontext: `docs/PROJEKTPLAN.md`.
 $env:PYTHONUTF8='1'
 .venv\Scripts\python.exe worker\main.py run [--only AAPL,MSFT]
 
-# Web → http://127.0.0.1:5000
-dotnet run --project web --no-launch-profile --urls http://127.0.0.1:5000
+# Web → http://127.0.0.1:5000 (Development lädt AdminPassword "dev" für den Login;
+# App-Argumente müssen hinter das "--", sonst schluckt dotnet run sie)
+dotnet run --project web --no-launch-profile -- --urls http://127.0.0.1:5000 --environment Development
 ```
 
 ## Konventionen

@@ -4,7 +4,7 @@
     {
       "name": "stocks-web",
       "runtimeExecutable": "C:\\Program Files\\dotnet\\dotnet.exe",
-      "runtimeArgs": ["run", "--project", "web", "--no-launch-profile", "--urls", "http://127.0.0.1:5000"],
+      "runtimeArgs": ["run", "--project", "web", "--no-launch-profile", "--", "--urls", "http://127.0.0.1:5000", "--environment", "Development"],
       "port": 5000
     }
   ]
