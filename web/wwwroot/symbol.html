@@ -1,11 +1,11 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="de">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Symbol · stocks.playmations.com</title>
-  <link rel="stylesheet" href="/css/app.css?v=3">
-  <script src="/js/app.js?v=3"></script>
+  <link rel="stylesheet" href="/css/app.css?v=4">
+  <script src="/js/app.js?v=4"></script>
   <script src="/js/lightweight-charts.standalone.production.js"></script>
   <script defer src="/js/alpine.min.js"></script>
   <script>
@@ -42,12 +42,13 @@
     <button class="toggle" x-show="admin" :class="{ on: analysis?.holding }" @click="toggleHolding()"
             title="Umschalten: bin ich hier investiert?"></button>
     <span x-text="analysis?.holding ? 'Im Depot (Holder-Framing)' : 'Nicht im Depot (Entry-Framing)'"></span>
-    <span class="stale" x-show="analysis" x-text="'· Analyse vom ' + fmtAsOf(analysis?.as_of)"></span>
+    <span class="stale" x-show="analysis"
+          x-text="'· Analyse vom ' + fmtAsOf(analysis?.as_of) + (analysis?.strategy ? ' · ' + analysis.strategy : '')"></span>
   </div>
 
   <!-- Action banner -->
-  <div class="banner" x-cloak x-show="analysis" :class="actionClass(analysis?.action)">
-    <div class="action-line" :title="analysis?.action" x-text="actionLabel(analysis?.action)"></div>
+  <div class="banner" x-cloak x-show="analysis" :class="actionClass(analysis?.action, analysis?.signal)">
+    <div class="action-line" :title="analysis?.action" x-text="actionLabel(analysis?.action, analysis?.signal)"></div>
     <div class="rationale" x-text="analysis?.rationale"></div>
     <div class="framing" x-text="analysis?.framing"></div>
   </div>
@@ -58,6 +59,28 @@
 
   <!-- Chart -->
   <div class="chart-card">
+    <div class="strategy-bar" x-cloak x-show="strategies && strategies.length">
+      <select class="strat-select" x-model="stratName" @change="selectStrategy(stratName)"
+              :title="currentStrategy()?.description || ''">
+        <template x-for="s in strategies" :key="s.name">
+          <option :value="s.name" x-text="s.label + (s.active ? ' · aktiv' : '')"></option>
+        </template>
+      </select>
+      <template x-for="[k, spec] in Object.entries(currentStrategy()?.params || {})" :key="k">
+        <label class="param">
+          <span x-text="spec.label || k"></span>
+          <input type="number" :min="spec.min" :max="spec.max" :step="spec.step || 1"
+                 x-model.number="stratParams[k]" @change="loadBacktest()">
+        </label>
+      </template>
+      <span class="bt-loading" x-cloak x-show="btLoading">…</span>
+      <span class="spacer"></span>
+      <button class="mini-btn" x-cloak x-show="admin" @click="saveStrategy(false)"
+              title="Parameter als Standard für diese Strategie speichern">Speichern</button>
+      <button class="mini-btn accent" x-cloak x-show="admin && !currentStrategy()?.active"
+              @click="saveStrategy(true)"
+              title="Diese Strategie (mit diesen Parametern) für den täglichen Lauf aktivieren">Aktiv setzen</button>
+    </div>
     <div class="chart-toolbar">
       <template x-for="r in ['3m','6m','1y']" :key="r">
         <button class="range-btn" :class="{ active: range === r }"
@@ -70,6 +93,47 @@
       </div>
     </div>
     <div id="chart"></div>
+  </div>
+
+  <!-- Backtest -->
+  <div class="acc" x-cloak x-show="backtest || backtestError || btLoading">
+    <button @click="open.bt = !open.bt">
+      <span class="chev" :class="{ open: open.bt }">▶</span> Backtest
+      <span class="summary" x-text="btSummary()"></span>
+    </button>
+    <div class="body" x-cloak x-show="open.bt">
+      <div class="bt-error" x-show="backtestError" x-text="backtestError"></div>
+      <template x-if="backtest">
+        <div>
+          <div class="bt-grid">
+            <template x-for="row in btRows()" :key="row[0]">
+              <div class="bt-cell">
+                <div class="bt-label" x-text="row[0]"></div>
+                <div class="bt-value" :class="row[2]" x-text="row[1]"></div>
+              </div>
+            </template>
+          </div>
+          <table class="trades" x-show="(backtest.trades || []).length">
+            <thead>
+              <tr><th>Einstieg</th><th>Ausstieg</th><th class="num">PnL</th><th class="num">Bars</th></tr>
+            </thead>
+            <tbody>
+              <template x-for="(t, i) in backtest.trades" :key="i">
+                <tr>
+                  <td><span x-text="t.entry_date"></span> <span class="t-price" x-text="'@ ' + fmtPrice(t.entry_price)"></span></td>
+                  <td><span x-text="t.open ? 'offen' : t.exit_date"></span> <span class="t-price" x-text="'@ ' + fmtPrice(t.exit_price)"></span></td>
+                  <td class="num" :class="signClass(t.pnl_pct)" x-text="fmtPct(t.pnl_pct)"></td>
+                  <td class="num" x-text="t.bars_held"></td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+          <div class="bt-note"
+               x-text="'Zeitraum ' + (backtest.meta?.from || '?') + ' – ' + (backtest.meta?.to || '?')
+                     + ' · Ausführung zum Signal-Close · ohne Gebühren/Slippage · Macro-Säule im Backtest nicht verfügbar'"></div>
+        </div>
+      </template>
+    </div>
   </div>
 
   <!-- Progressive disclosure -->

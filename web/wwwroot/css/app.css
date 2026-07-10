@@ -174,6 +174,57 @@ table.watch tbody tr:hover .remove-btn { opacity: 1; }
 .legend .key { display: inline-block; width: 14px; height: 2px; vertical-align: middle; margin-right: 5px; }
 #chart { height: 420px; }
 
+/* ---- Strategie-Leiste + Backtest -------------------------------------- */
+.strategy-bar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding-bottom: 8px; margin-bottom: 8px; border-bottom: 1px solid var(--border);
+  font-size: 12px; color: var(--muted);
+}
+.strategy-bar .spacer { flex: 1; }
+.strat-select {
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px;
+  color: var(--text); font-size: 12.5px; padding: 4px 8px; outline: none; cursor: pointer;
+}
+.strategy-bar .param { display: inline-flex; align-items: center; gap: 6px; }
+.strategy-bar .param input {
+  width: 62px; padding: 3px 6px;
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px;
+  color: var(--text); font-family: var(--mono); font-size: 12.5px; outline: none;
+}
+.strategy-bar .param input:focus { border-color: #3b434d; }
+.bt-loading { color: var(--amber); }
+.mini-btn {
+  background: none; border: 1px solid var(--border); color: var(--muted);
+  border-radius: 6px; padding: 3px 10px; font-size: 12px; cursor: pointer;
+}
+.mini-btn:hover { color: var(--text); background: var(--panel-2); }
+.mini-btn.accent { color: var(--up); border-color: rgba(38,166,154,.4); }
+.mini-btn.accent:hover { background: rgba(38,166,154,.12); }
+
+.bt-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(105px, 1fr));
+  gap: 8px; margin: 10px 0;
+}
+.bt-cell { background: var(--panel-2); border-radius: 8px; padding: 8px 10px; }
+.bt-label { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); }
+.bt-value { font-family: var(--mono); font-weight: 600; font-size: 14px; margin-top: 2px; }
+.bt-value.pos { color: var(--up); }
+.bt-value.neg { color: var(--down); }
+.bt-error { color: var(--down); padding: 8px 0; }
+.bt-note { color: #444c56; font-size: 11.5px; margin-top: 10px; }
+
+table.trades { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 6px; }
+table.trades th {
+  text-align: left; font-size: 10.5px; text-transform: uppercase; letter-spacing: .6px;
+  color: var(--muted); font-weight: 600; padding: 4px 8px; border-bottom: 1px solid var(--border);
+}
+table.trades th.num, table.trades td.num { text-align: right; }
+table.trades td { padding: 5px 8px; border-bottom: 1px solid #191f27; }
+table.trades td.num { font-family: var(--mono); }
+table.trades td.num.pos { color: var(--up); }
+table.trades td.num.neg { color: var(--down); }
+.t-price { color: var(--muted); font-family: var(--mono); font-size: 11.5px; }
+
 /* ---- accordions (progressive disclosure) ----------------------------- */
 .acc { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; margin: 10px 0; overflow: hidden; }
 .acc > button {

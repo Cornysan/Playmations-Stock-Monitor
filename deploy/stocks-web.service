@@ -11,6 +11,8 @@ RestartSec=5
 Environment=ASPNETCORE_URLS=http://127.0.0.1:5000
 Environment=DOTNET_ENVIRONMENT=Production
 Environment=DbPath=/var/lib/stocks/stocks.db
+# Für On-Demand-Backtests (worker/backtest.py wird vom Web gespawnt, liest read-only)
+Environment=PythonPath=/var/www/stocks/venv/bin/python
 # AdminPassword etc. — nicht ins Repo, nur auf dem Server:
 EnvironmentFile=-/etc/stocks/env
 

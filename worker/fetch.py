@@ -71,7 +71,8 @@ def download_bars(symbols: list[str], start: dt.date) -> dict[str, list[tuple]]:
 
         for sym in chunk:
             try:
-                sub = df[sym] if len(chunk) > 1 else df
+                # group_by="ticker" liefert auch bei EINEM Ticker MultiIndex-Spalten
+                sub = df[sym] if df.columns.nlevels > 1 else df
             except KeyError:
                 continue
             sub = sub.dropna(subset=["Close"])

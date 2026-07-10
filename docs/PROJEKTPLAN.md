@@ -315,6 +315,37 @@ Auch in der rudimentären Phase gehören Keys nicht ins Repo.
 
 ---
 
+## 11. Strategien & Backtesting (Nachtrag Juli 2026)
+
+Signal-Logik ist seit Juli 2026 austauschbar (à la TradingView-Strategien, aber ohne
+Code-Editing in der UI — kein Remote-Code-Execution-Risiko):
+
+- **Plugins:** `worker/strategies/<name>.py` mit `NAME/LABEL/DESCRIPTION/PARAMS` und
+  `decide(closes, holding, params, macro_score) → card` (bewertet den letzten Bar;
+  Kontrakt im Package-`__init__.py`). Default `three_pillars` wrappt das unveränderte
+  `score.py`; `ema_cross` dient als Vorlage. Neue Strategien = neue Datei im Repo,
+  die UI editiert ausschließlich die deklarierten Parameter.
+- **Aktive Strategie:** Tabelle `strategy_config` (name, params_json, active).
+  Genau eine aktiv (ohne Eintrag: `three_pillars`); sie erzeugt die täglichen
+  Actions/Badges. `analysis` hat dafür die Spalten `strategy` + `signal`
+  (normalisiert BUY/HOLD/SELL). Web darf `strategy_config` schreiben (admin-only) —
+  neben `watchlist` die einzige Ausnahme vom Single-Writer-Prinzip.
+- **Backtests:** `worker/backtest.py` (stdlib-only, DB read-only) iteriert `decide()`
+  über die Historie mit simulierter Position. Ausführung zum **Signal-Close**,
+  eine Position all-in/all-out, keine Gebühren; Macro-Säule historisch nicht
+  verfügbar (`macro_score=None`). Ergebnis: `signals` (Chart-Marker ▲▼), `trades`,
+  `stats` (Rendite, Buy&Hold, Win-Rate, Profit-Faktor, Max Drawdown, Exposure),
+  `equity`-Kurve. On-demand vom Web gespawnt (Config `PythonPath`), 1 h MemoryCache,
+  nichts persistiert.
+- **API:** `GET /api/strategies`, `PUT /api/strategies/{name}` (admin; Params +
+  aktiv setzen), `GET /api/symbols/{s}/backtest?strategy=&params=` (Params werden
+  gegen das Schema validiert/geklemmt, bevor sie den Python-Spawn erreichen).
+- **UI:** Strategie-Dropdown + Parameter-Inputs überm Chart (Änderung → Backtest neu),
+  Buy/Sell-Marker im Chart, Backtest-Accordion mit Statistik-Grid + Trade-Liste.
+  Admin-Buttons „Speichern" / „Aktiv setzen".
+
+---
+
 ## Anhang – Rollen der bestehenden Skripte
 
 - **`indicators.py`** – deterministische Indikator-Engine (EMA 20/50/200, RSI-14 Wilder,

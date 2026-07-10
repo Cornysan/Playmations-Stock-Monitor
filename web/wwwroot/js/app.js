@@ -1,8 +1,10 @@
 // Shared helpers — pure presentation, no signal math happens in the frontend.
 
-// Kurzlabel fürs UI: alles auf BUY / HOLD / SELL eingedampft. Die
-// Original-Action aus score.py bleibt unverändert in DB/API/Tooltip.
-function actionLabel(action) {
+// Kurzlabel fürs UI: alles auf BUY / HOLD / SELL eingedampft. Neue Analysen
+// tragen das normalisierte `signal` direkt (kommt aus der Strategie); das
+// Action-Mapping bleibt als Fallback für Bestandsdaten aus score.py-Zeiten.
+function actionLabel(action, signal) {
+  if (signal === "BUY" || signal === "SELL" || signal === "HOLD") return signal;
   if (!action) return null;
   if (action.startsWith("RE-ENTRY")) return "BUY";
   if (action.startsWith("TACTICAL")) return "BUY";      // Gegentrend-Rebound
@@ -12,8 +14,8 @@ function actionLabel(action) {
 }
 
 // Badge-/Banner-Farbe: BUY grün, HOLD weiß, SELL rot.
-function actionClass(action) {
-  const label = actionLabel(action);
+function actionClass(action, signal) {
+  const label = actionLabel(action, signal);
   if (!label) return "act-none";
   return { BUY: "act-buy", HOLD: "act-hold", SELL: "act-sell" }[label];
 }
@@ -33,6 +35,11 @@ function fmtSigned(v) {
 function signClass(v) {
   if (v == null) return "zero";
   return v > 0 ? "pos" : v < 0 ? "neg" : "zero";
+}
+
+function fmtPct(v, digits = 2) {
+  if (v == null) return "—";
+  return (v > 0 ? "+" : "") + v.toFixed(digits) + "%";
 }
 
 // Top flags for the badge tooltip (2–3 strongest, see plan §8.1)
@@ -67,7 +74,15 @@ function detailState() {
     range: "1y",
     chart: null,
     series: null,
-    open: { pillars: false, flags: false, ind: false, macro: false },
+    markersApi: null,
+    firstBarTime: null,
+    strategies: null,     // [{name,label,description,params,saved_params,active}]
+    stratName: null,
+    stratParams: {},
+    backtest: null,
+    backtestError: null,
+    btLoading: false,
+    open: { pillars: false, flags: false, ind: false, macro: false, bt: false },
 
     async show(symbol) {
       if (!symbol) return;
@@ -75,7 +90,11 @@ function detailState() {
       this.analysis = null;
       this.analysisMissing = false;
       this.lastClose = null;
-      await Promise.all([this.loadAnalysis(), this.loadChart()]);
+      this.backtest = null;
+      this.backtestError = null;
+      this.applyMarkers();
+      await Promise.all([this.loadAnalysis(), this.loadChart(), this.ensureStrategies()]);
+      await this.loadBacktest();
     },
 
     async loadAnalysis() {
@@ -99,6 +118,8 @@ function detailState() {
       this.series.ema20.setData([]);
       this.series.ema50.setData([]);
       this.series.ema200.setData([]);
+      this.firstBarTime = null;
+      this.applyMarkers();
     },
 
     renderChart(data) {
@@ -134,6 +155,7 @@ function detailState() {
           ema200: this.chart.addSeries(LWC.LineSeries, { color: "#a371f7", lineWidth: 1.5, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false }),
         };
         this.chart.priceScale("volume").applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
+        this.markersApi = LWC.createSeriesMarkers(this.series.candles, []);
       }
       this.series.candles.setData(data.bars);
       this.series.volume.setData(data.bars.map((b) => ({
@@ -143,7 +165,111 @@ function detailState() {
       this.series.ema20.setData(data.ema20);
       this.series.ema50.setData(data.ema50);
       this.series.ema200.setData(data.ema200);
+      this.firstBarTime = data.bars.length ? data.bars[0].time : null;
+      this.applyMarkers();
       this.chart.timeScale().fitContent();
+    },
+
+    // ---- Strategien + Backtest --------------------------------------------
+
+    async ensureStrategies() {
+      if (this.strategies) return;
+      const resp = await fetch("/api/strategies");
+      if (!resp.ok) { this.strategies = []; return; }
+      this.strategies = await resp.json();
+      const active = this.strategies.find((s) => s.active) || this.strategies[0];
+      if (active) this.selectStrategy(active.name, false);
+    },
+
+    currentStrategy() {
+      return (this.strategies || []).find((s) => s.name === this.stratName) || null;
+    },
+
+    selectStrategy(name, reload = true) {
+      this.stratName = name;
+      const s = this.currentStrategy();
+      this.stratParams = {};
+      for (const [k, spec] of Object.entries(s?.params || {}))
+        this.stratParams[k] = s.saved_params?.[k] ?? spec.default;
+      if (reload) this.loadBacktest();
+    },
+
+    async loadBacktest() {
+      if (!this.symbol || !this.stratName) return;
+      const requested = this.symbol;
+      this.btLoading = true;
+      this.backtestError = null;
+      const url = "/api/symbols/" + encodeURIComponent(requested) + "/backtest"
+        + "?strategy=" + encodeURIComponent(this.stratName)
+        + "&params=" + encodeURIComponent(JSON.stringify(this.stratParams));
+      const resp = await fetch(url);
+      if (requested !== this.symbol) return; // Nutzer hat inzwischen gewechselt
+      this.btLoading = false;
+      if (!resp.ok) {
+        this.backtest = null;
+        this.backtestError = (await resp.json().catch(() => ({}))).error || "Backtest fehlgeschlagen";
+        this.applyMarkers();
+        return;
+      }
+      this.backtest = await resp.json();
+      this.applyMarkers();
+    },
+
+    applyMarkers() {
+      if (!this.markersApi) return;
+      const first = this.firstBarTime;
+      const sigs = (this.backtest?.signals || []).filter((s) => !first || s.date >= first);
+      this.markersApi.setMarkers(sigs.map((s) => ({
+        time: s.date,
+        position: s.type === "buy" ? "belowBar" : "aboveBar",
+        color: s.type === "buy" ? "#26a69a" : "#ef5350",
+        shape: s.type === "buy" ? "arrowUp" : "arrowDown",
+        text: s.type === "buy" ? "Buy" : "Sell",
+      })));
+    },
+
+    async saveStrategy(setActive = false) {
+      const body = { params: this.stratParams };
+      if (setActive) body.active = true;
+      const resp = await fetch("/api/strategies/" + encodeURIComponent(this.stratName), {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!resp.ok) {
+        alert(resp.status === 401 ? "Nur mit Admin-Login möglich." : "Speichern fehlgeschlagen.");
+        return;
+      }
+      const s = this.currentStrategy();
+      if (s) {
+        s.saved_params = { ...this.stratParams };
+        if (setActive) this.strategies.forEach((x) => { x.active = x.name === s.name; });
+      }
+    },
+
+    btSummary() {
+      if (this.backtestError) return this.backtestError;
+      const st = this.backtest?.stats;
+      if (!st) return this.btLoading ? "läuft…" : "";
+      const parts = [fmtPct(st.total_return_pct), st.n_trades + " Trades"];
+      if (st.win_rate_pct != null) parts.push(st.win_rate_pct.toFixed(0) + "% Win");
+      return parts.join(" · ");
+    },
+
+    btRows() {
+      const st = this.backtest?.stats;
+      if (!st) return [];
+      return [
+        ["Rendite", fmtPct(st.total_return_pct), signClass(st.total_return_pct)],
+        ["Buy & Hold", fmtPct(st.buy_hold_return_pct), signClass(st.buy_hold_return_pct)],
+        ["Trades", String(st.n_trades), ""],
+        ["Win-Rate", st.win_rate_pct != null ? st.win_rate_pct.toFixed(0) + "%" : "—", ""],
+        ["Ø Gewinn", fmtPct(st.avg_win_pct), "pos"],
+        ["Ø Verlust", fmtPct(st.avg_loss_pct), "neg"],
+        ["Profit-Faktor", st.profit_factor != null ? String(st.profit_factor) : "—", ""],
+        ["Max Drawdown", st.max_drawdown_pct != null ? "−" + st.max_drawdown_pct + "%" : "—", "neg"],
+        ["Exposure", st.exposure_pct != null ? st.exposure_pct.toFixed(0) + "%" : "—", ""],
+      ];
     },
 
     async toggleHolding() {

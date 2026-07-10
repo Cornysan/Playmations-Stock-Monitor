@@ -44,6 +44,12 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now stocks-web stocks-worker
 ```
 
+Hinweis: Das Deployment kopiert die Units **nicht** neu — nach Änderungen an den
+`.service`-Dateien im Repo diesen Schritt manuell wiederholen. Die Web-Unit setzt
+`PythonPath` für die On-Demand-Backtests (`worker/backtest.py`, liest die DB
+read-only); fehlt die Variable, findet die App das venv unter
+`/var/www/stocks/venv` auch selbst.
+
 Caddy läuft auf diesem Server bereits (serviert andere Seiten) — **nicht** die
 `/etc/caddy/Caddyfile` überschreiben, sondern den Block aus `deploy/Caddyfile`
 ans Ende der bestehenden Datei anhängen:

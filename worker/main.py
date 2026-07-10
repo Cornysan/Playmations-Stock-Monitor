@@ -20,7 +20,7 @@ import config
 import db
 import fetch
 import macro_pillar
-import score
+import strategies
 
 log = logging.getLogger("worker")
 
@@ -91,22 +91,35 @@ def run_macro(con, as_of: str) -> int | None:
     return result.pillar_score
 
 
+def active_strategy(con):
+    """Aktive Strategie + Params aus strategy_config; Fallback auf den Default."""
+    name, params = db.active_strategy(con) or (strategies.DEFAULT, {})
+    strat = strategies.get(name)
+    if strat is None:
+        log.error("active strategy %r not found — falling back to %s",
+                  name, strategies.DEFAULT)
+        strat, params = strategies.get(strategies.DEFAULT), {}
+    return strat, params
+
+
 def analyze_symbols(con, rows, macro_score: int | None, as_of: str) -> None:
     update_bars(con, [r["symbol"] for r in rows])
+    strat, params = active_strategy(con)
+    log.info("strategy: %s params=%s", strat.NAME, strategies.resolve_params(strat, params))
     for row in rows:
         sym = row["symbol"]
         closes = db.closes(con, sym)
         if len(closes) < 60:
             log.warning("%s: only %d bars — skipping analysis", sym, len(closes))
             continue
-        card = score.score_symbol(
-            closes,
-            macro_score=macro_score,
-            symbol=sym,
+        card = strategies.run(
+            strat, closes,
             holding=bool(row["holding"]),
+            params=params,
+            macro_score=macro_score,
         )
-        db.write_analysis(con, sym, as_of, card)
-        log.info("%s: %-28s total=%+d", sym, card["decision"]["action"], card["pillar_total"])
+        db.write_analysis(con, sym, as_of, card, strat.NAME)
+        log.info("%s: %-28s signal=%s", sym, card["action"], card["signal"])
 
 
 def run_once(con, only: list[str] | None = None) -> None:

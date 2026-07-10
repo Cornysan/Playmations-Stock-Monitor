@@ -8,9 +8,18 @@ Selbstgehostetes Stock-Analyse-Dashboard. Voller Kontext: `docs/PROJEKTPLAN.md`.
   **unveränderlichen** Kern-Skripten `indicators.py` / `score.py` / `macro_pillar.py`
   (deterministisch, stdlib-only — Numerik niemals in C#/JS nachbauen) und schreibt
   nach `data/stocks.db` (SQLite, WAL). Einziger Schreiber für Analyse-Tabellen.
+  Signale kommen aus austauschbaren Plugins in `worker/strategies/` (Kontrakt:
+  dortiges `__init__.py`; Default `three_pillars` wrappt score.py). Die via
+  `strategy_config`-Tabelle aktive Strategie steuert den täglichen Run.
+- `worker/backtest.py` — stdlib-only, DB strikt read-only, importiert kein
+  yfinance. Wird vom Web on-demand gespawnt (`list` bzw.
+  `run SYMBOL --strategy … --params … --db …`), liefert Signale/Trades/Statistik
+  als JSON auf stdout; Ergebnisse werden nicht persistiert (MemoryCache im Web).
 - `web/` — ASP.NET Core (.NET 10) Minimal-API + statisches Frontend
   (`wwwroot/`, Alpine.js + Lightweight Charts v5, vendored). Liest die DB;
-  schreibt nur `watchlist` (add/remove/holding).
+  schreibt nur `watchlist` (add/remove/holding) und `strategy_config`
+  (Params speichern / aktiv setzen, admin-only). Config `PythonPath` zeigt auf
+  den Worker-Python (Auto-Fallback: `.venv/` im Repo bzw. `venv/` am Server).
 - `deploy/` — systemd-Units, Caddyfile, Server-Setup (`deploy/README.md`).
   CI/CD: `.github/workflows/deploy.yml`, self-hosted Runner auf dem Server.
 

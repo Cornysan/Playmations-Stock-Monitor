@@ -50,6 +50,14 @@ CREATE TABLE IF NOT EXISTS meta (
   value TEXT
 );
 
+-- Strategie-Auswahl + Parameter-Overrides. Neben watchlist die einzige
+-- Tabelle, die auch das Web beschreibt (UI: Params speichern / aktiv setzen).
+CREATE TABLE IF NOT EXISTS strategy_config (
+  name        TEXT PRIMARY KEY,
+  params_json TEXT,
+  active      INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE INDEX IF NOT EXISTS idx_analysis_symbol_asof ON analysis(symbol, as_of DESC);
 """
 
@@ -61,7 +69,17 @@ def connect(db_path: Path) -> sqlite3.Connection:
     con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA synchronous=NORMAL")
     con.executescript(SCHEMA)
+    _migrate(con)
     return con
+
+
+def _migrate(con: sqlite3.Connection) -> None:
+    cols = {r["name"] for r in con.execute("PRAGMA table_info(analysis)")}
+    if "strategy" not in cols:
+        con.execute("ALTER TABLE analysis ADD COLUMN strategy TEXT")
+    if "signal" not in cols:
+        con.execute("ALTER TABLE analysis ADD COLUMN signal TEXT")
+    con.commit()
 
 
 # --- watchlist -------------------------------------------------------------
@@ -111,28 +129,38 @@ def closes(con: sqlite3.Connection, symbol: str, limit: int = 320) -> list[float
 
 # --- analysis / macro ------------------------------------------------------
 
-def write_analysis(con: sqlite3.Connection, symbol: str, as_of: str, card: dict) -> None:
-    p = card["pillars"]
-    d = card["decision"]
+def write_analysis(con: sqlite3.Connection, symbol: str, as_of: str,
+                   card: dict, strategy: str) -> None:
+    """card: flaches Strategie-Ergebnis (Kontrakt siehe strategies/__init__.py)."""
     con.execute(
         "INSERT OR REPLACE INTO analysis(symbol, as_of, trend_score, momentum_score, "
-        "macro_score, pillar_total, action, rationale, framing, flags_json, indicators_json) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        "macro_score, pillar_total, action, rationale, framing, flags_json, "
+        "indicators_json, strategy, signal) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             symbol, as_of,
-            p["trend"]["score"], p["momentum"]["score"], p["macro_sentiment"]["score"],
+            card["trend_score"], card["momentum_score"], card["macro_score"],
             card["pillar_total"],
-            d["action"], d["rationale"], d["framing"],
-            json.dumps({
-                **d["flags"],
-                "trend_detail": p["trend"]["detail"],
-                "momentum_detail": p["momentum"]["detail"],
-                "warning": card.get("warning"),
-            }),
+            card["action"], card["rationale"], card["framing"],
+            json.dumps(card["flags"]),
             json.dumps(card["indicators"]),
+            strategy, card["signal"],
         ),
     )
     con.commit()
+
+
+def active_strategy(con: sqlite3.Connection) -> tuple[str, dict] | None:
+    """(name, params) der aktiven Strategie, oder None (→ Default)."""
+    row = con.execute(
+        "SELECT name, params_json FROM strategy_config WHERE active=1 LIMIT 1"
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        params = json.loads(row["params_json"]) if row["params_json"] else {}
+    except ValueError:
+        params = {}
+    return row["name"], params if isinstance(params, dict) else {}
 
 
 def write_macro(con: sqlite3.Connection, as_of: str, result) -> None:

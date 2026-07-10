@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -79,6 +80,102 @@ double?[] EmaSeries(double[] values, int period)
         output[i] = prev;
     }
     return output;
+}
+
+// --------------------------------------------------------------------------
+// Python-Bridge — Strategie-Liste + Backtests kommen aus worker/backtest.py.
+// Numerik bleibt ausschließlich in Python; der Backtest liest die DB read-only.
+// --------------------------------------------------------------------------
+
+var workerDir = Path.GetFullPath(Path.Combine(app.Environment.ContentRootPath, "..", "worker"));
+var pythonPath = app.Configuration["PythonPath"];
+if (string.IsNullOrEmpty(pythonPath))
+{
+    var candidates = new[]
+    {
+        Path.Combine(app.Environment.ContentRootPath, "..", ".venv", "Scripts", "python.exe"),
+        Path.Combine(app.Environment.ContentRootPath, "..", ".venv", "bin", "python"),
+        Path.Combine(app.Environment.ContentRootPath, "..", "venv", "bin", "python"),
+    };
+    pythonPath = candidates.FirstOrDefault(File.Exists) is string venv
+        ? Path.GetFullPath(venv)
+        : (OperatingSystem.IsWindows() ? "python" : "python3");
+}
+
+async Task<(int Code, string Stdout, string Stderr)> RunPython(params string[] args)
+{
+    var psi = new ProcessStartInfo
+    {
+        FileName = pythonPath,
+        WorkingDirectory = workerDir,
+        RedirectStandardOutput = true,
+        RedirectStandardError = true,
+        UseShellExecute = false,
+    };
+    psi.Environment["PYTHONUTF8"] = "1";
+    psi.ArgumentList.Add("backtest.py");
+    foreach (var a in args) psi.ArgumentList.Add(a);
+    using var proc = Process.Start(psi)!;
+    var stdout = proc.StandardOutput.ReadToEndAsync();
+    var stderr = proc.StandardError.ReadToEndAsync();
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+    try { await proc.WaitForExitAsync(cts.Token); }
+    catch (OperationCanceledException)
+    {
+        try { proc.Kill(entireProcessTree: true); } catch { /* bereits beendet */ }
+        return (-1, "", "timeout");
+    }
+    return (proc.ExitCode, await stdout, await stderr);
+}
+
+// Katalog = NAME/LABEL/PARAMS-Schema aller Plugins (Quelle: Python, gecacht).
+async Task<JsonElement?> StrategyCatalog()
+{
+    var cache = app.Services.GetRequiredService<IMemoryCache>();
+    if (cache.TryGetValue("strategies:catalog", out JsonElement cached)) return cached;
+    var (code, stdout, stderr) = await RunPython("list");
+    if (code != 0)
+    {
+        app.Logger.LogError("backtest.py list fehlgeschlagen ({Code}): {Err}", code, stderr);
+        return null;
+    }
+    var catalog = JsonSerializer.Deserialize<JsonElement>(stdout);
+    cache.Set("strategies:catalog", catalog, TimeSpan.FromMinutes(5));
+    return catalog;
+}
+
+JsonElement? FindStrategySchema(JsonElement catalog, string name)
+{
+    foreach (var s in catalog.EnumerateArray())
+        if (s.GetProperty("name").GetString() == name)
+            return s.GetProperty("params");
+    return null;
+}
+
+// Normalerweise legt der Worker das Schema an; falls das Web zuerst dran ist.
+void EnsureStrategyTable() => Execute(
+    "CREATE TABLE IF NOT EXISTS strategy_config(" +
+    "name TEXT PRIMARY KEY, params_json TEXT, active INTEGER NOT NULL DEFAULT 0)");
+
+// Params gegen das PARAMS-Schema klemmen; null bei nicht-numerischen Werten.
+// Unbekannte Keys werden verworfen — es erreicht nur validiertes JSON den Python-Spawn.
+SortedDictionary<string, double>? ValidateParams(JsonElement schema, JsonElement? given)
+{
+    var result = new SortedDictionary<string, double>();
+    foreach (var p in schema.EnumerateObject())
+    {
+        var v = p.Value.GetProperty("default").GetDouble();
+        if (given?.ValueKind == JsonValueKind.Object &&
+            given.Value.TryGetProperty(p.Name, out var raw))
+        {
+            if (raw.ValueKind != JsonValueKind.Number) return null;
+            v = raw.GetDouble();
+        }
+        if (p.Value.TryGetProperty("min", out var min)) v = Math.Max(v, min.GetDouble());
+        if (p.Value.TryGetProperty("max", out var max)) v = Math.Min(v, max.GetDouble());
+        result[p.Name] = v;
+    }
+    return result;
 }
 
 // --------------------------------------------------------------------------
@@ -194,7 +291,7 @@ app.MapGet("/api/watchlist", () =>
 {
     var rows = Query("""
         SELECT w.symbol, w.name, w.holding,
-               a.as_of, a.action, a.pillar_total,
+               a.as_of, a.action, a.signal, a.strategy, a.pillar_total,
                a.trend_score, a.momentum_score, a.macro_score, a.flags_json,
                (SELECT close FROM bars b WHERE b.symbol = w.symbol ORDER BY date DESC LIMIT 1) AS last_price,
                (SELECT date  FROM bars b WHERE b.symbol = w.symbol ORDER BY date DESC LIMIT 1) AS last_date,
@@ -286,6 +383,148 @@ app.MapGet("/api/macro", () =>
     row.Remove("components_json");
     row.Remove("notes_json");
     return Results.Json(row);
+});
+
+// --------------------------------------------------------------------------
+// Strategien + Backtesting
+// --------------------------------------------------------------------------
+
+app.MapGet("/api/strategies", async () =>
+{
+    var catalog = await StrategyCatalog();
+    if (catalog is null)
+        return Results.Json(new { error = "Strategie-Liste nicht verfügbar (PythonPath prüfen)" }, statusCode: 503);
+    EnsureStrategyTable();
+    var saved = Query("SELECT name, params_json, active FROM strategy_config")
+        .ToDictionary(r => (string)r["name"]!);
+
+    var rows = new List<Dictionary<string, object?>>();
+    foreach (var s in catalog.Value.EnumerateArray())
+    {
+        var name = s.GetProperty("name").GetString()!;
+        saved.TryGetValue(name, out var cfg);
+        rows.Add(new Dictionary<string, object?>
+        {
+            ["name"] = name,
+            ["label"] = s.GetProperty("label").GetString(),
+            ["description"] = s.GetProperty("description").GetString(),
+            ["params"] = s.GetProperty("params"),
+            ["saved_params"] = cfg is null ? null : ParseJson(cfg["params_json"]),
+            ["active"] = cfg is not null && Convert.ToInt64(cfg["active"]!) == 1,
+        });
+    }
+    // Ohne explizite Wahl gilt der Drei-Säulen-Standard als aktiv (Worker-Fallback).
+    if (rows.Count > 0 && !rows.Any(r => (bool)r["active"]!))
+        (rows.FirstOrDefault(r => (string)r["name"]! == "three_pillars") ?? rows[0])["active"] = true;
+    return Results.Json(rows);
+});
+
+app.MapPut("/api/strategies/{name}", async (string name, HttpRequest request) =>
+{
+    if (!IsAdmin(request)) return Results.Unauthorized();
+    var catalog = await StrategyCatalog();
+    if (catalog is null)
+        return Results.Json(new { error = "Strategie-Liste nicht verfügbar (PythonPath prüfen)" }, statusCode: 503);
+    if (FindStrategySchema(catalog.Value, name) is not JsonElement schema)
+        return Results.NotFound(new { error = $"unbekannte Strategie '{name}'" });
+
+    var body = await JsonSerializer.DeserializeAsync<JsonElement>(request.Body);
+    string? paramsJson = null;
+    if (body.TryGetProperty("params", out var given))
+    {
+        var validated = ValidateParams(schema, given);
+        if (validated is null)
+            return Results.BadRequest(new { error = "params: nur numerische Werte erlaubt" });
+        paramsJson = JsonSerializer.Serialize(validated);
+    }
+
+    EnsureStrategyTable();
+    long activeVal;
+    using (var con = Open())
+    using (var tx = con.BeginTransaction())
+    {
+        if (body.TryGetProperty("active", out var act) &&
+            act.ValueKind is JsonValueKind.True or JsonValueKind.False)
+        {
+            activeVal = act.GetBoolean() ? 1 : 0;
+            if (activeVal == 1)
+            {
+                using var off = con.CreateCommand();
+                off.Transaction = tx;
+                off.CommandText = "UPDATE strategy_config SET active = 0";
+                off.ExecuteNonQuery();
+            }
+        }
+        else
+        {
+            using var cur = con.CreateCommand();
+            cur.Transaction = tx;
+            cur.CommandText = "SELECT active FROM strategy_config WHERE name = @n";
+            cur.Parameters.AddWithValue("@n", name);
+            activeVal = cur.ExecuteScalar() is long l ? l : 0;
+        }
+        using var up = con.CreateCommand();
+        up.Transaction = tx;
+        up.CommandText = """
+            INSERT INTO strategy_config(name, params_json, active) VALUES(@n, @p, @a)
+            ON CONFLICT(name) DO UPDATE SET
+              params_json = COALESCE(excluded.params_json, params_json),
+              active = excluded.active
+            """;
+        up.Parameters.AddWithValue("@n", name);
+        up.Parameters.AddWithValue("@p", (object?)paramsJson ?? DBNull.Value);
+        up.Parameters.AddWithValue("@a", activeVal);
+        up.ExecuteNonQuery();
+        tx.Commit();
+    }
+    return Results.Json(new { name, saved = paramsJson is not null, active = activeVal == 1 });
+});
+
+app.MapGet("/api/symbols/{symbol}/backtest", async (string symbol, string? strategy, string? @params) =>
+{
+    symbol = symbol.ToUpperInvariant();
+    var catalog = await StrategyCatalog();
+    if (catalog is null)
+        return Results.Json(new { error = "Backtest nicht verfügbar (PythonPath prüfen)" }, statusCode: 503);
+    strategy ??= "three_pillars";
+    if (FindStrategySchema(catalog.Value, strategy) is not JsonElement schema)
+        return Results.NotFound(new { error = $"unbekannte Strategie '{strategy}'" });
+
+    JsonElement? given = null;
+    if (!string.IsNullOrEmpty(@params))
+    {
+        try { given = JsonSerializer.Deserialize<JsonElement>(@params); }
+        catch (JsonException) { return Results.BadRequest(new { error = "params: kein gültiges JSON" }); }
+    }
+    var validated = ValidateParams(schema, given);
+    if (validated is null)
+        return Results.BadRequest(new { error = "params: nur numerische Werte erlaubt" });
+    var canonical = JsonSerializer.Serialize(validated);
+
+    var last = Query("SELECT MAX(date) d FROM bars WHERE symbol = @s AND close IS NOT NULL",
+        ("@s", symbol));
+    if (last.Count == 0 || last[0]["d"] is not string lastDate)
+        return Results.NotFound(new { error = "no bars for symbol" });
+
+    var cache = app.Services.GetRequiredService<IMemoryCache>();
+    var key = $"bt:{symbol}:{strategy}:{canonical}:{lastDate}";
+    if (cache.TryGetValue(key, out string? cached) && cached is not null)
+        return Results.Content(cached, "application/json");
+
+    var (code, stdout, stderr) = await RunPython("run", symbol,
+        "--strategy", strategy, "--params", canonical, "--db", dbPath);
+    if (code != 0)
+    {
+        app.Logger.LogError("Backtest {Symbol}/{Strategy} fehlgeschlagen ({Code}): {Err}",
+            symbol, strategy, code, string.IsNullOrEmpty(stderr) ? stdout : stderr);
+        // backtest.py meldet fachliche Fehler als {"error": ...} auf stdout
+        var payload = stdout.TrimStart().StartsWith('{')
+            ? stdout
+            : JsonSerializer.Serialize(new { error = "Backtest fehlgeschlagen" });
+        return Results.Content(payload, "application/json", null, 422);
+    }
+    cache.Set(key, stdout, TimeSpan.FromHours(1));
+    return Results.Content(stdout, "application/json");
 });
 
 app.MapGet("/api/symbols/search", async (string? q) =>
