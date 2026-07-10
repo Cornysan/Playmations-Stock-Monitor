@@ -21,6 +21,7 @@ import db
 import fetch
 import macro_pillar
 import strategies
+import trader
 
 log = logging.getLogger("worker")
 
@@ -126,6 +127,18 @@ def run_once(con, only: list[str] | None = None) -> None:
     as_of = now_iso()
     log.info("=== daily run %s ===", as_of)
 
+    # Broker-Fehler dürfen die Analyse nie verhindern (und umgekehrt bricht
+    # ein Yahoo-Rate-Limit unten den Run ab, BEVOR gehandelt wird — es wird
+    # nie auf Basis veralteter Signale geordert).
+    trading = trader.enabled()
+    db.set_meta(con, "trading_enabled", "1" if trading else "0")
+    if trading:
+        try:
+            trader.sync(con)
+        except Exception as e:
+            log.error("trader sync failed (run continues without trading): %s", e)
+            trading = False
+
     try:
         macro_score = run_macro(con, as_of)
 
@@ -135,6 +148,12 @@ def run_once(con, only: list[str] | None = None) -> None:
             rows = [r for r in rows if r["symbol"].upper() in wanted]
         log.info("analyzing %d symbols", len(rows))
         analyze_symbols(con, rows, macro_score, as_of)
+
+        if trading:
+            try:
+                trader.trade(con, as_of)
+            except Exception as e:
+                log.error("trading failed (analysis is unaffected): %s", e)
 
         db.set_meta(con, "last_run_ok", as_of)
         log.info("=== run complete ===")

@@ -290,7 +290,7 @@ async Task<List<Dictionary<string, object?>>> YahooSearch(string query)
 app.MapGet("/api/watchlist", () =>
 {
     var rows = Query("""
-        SELECT w.symbol, w.name, w.holding,
+        SELECT w.symbol, w.name, w.holding, w.autotrade,
                a.as_of, a.action, a.signal, a.strategy, a.pillar_total,
                a.trend_score, a.momentum_score, a.macro_score, a.flags_json,
                (SELECT close FROM bars b WHERE b.symbol = w.symbol ORDER BY date DESC LIMIT 1) AS last_price,
@@ -360,7 +360,7 @@ app.MapGet("/api/symbols/{symbol}/bars", (string symbol, string? range) =>
 app.MapGet("/api/symbols/{symbol}/analysis", (string symbol) =>
 {
     var rows = Query("""
-        SELECT a.*, w.name, w.holding FROM analysis a
+        SELECT a.*, w.name, w.holding, w.autotrade FROM analysis a
         LEFT JOIN watchlist w ON w.symbol = a.symbol
         WHERE a.symbol = @s ORDER BY a.as_of DESC LIMIT 1
         """, ("@s", symbol.ToUpperInvariant()));
@@ -573,11 +573,56 @@ app.MapPatch("/api/watchlist/{symbol}", async (string symbol, HttpRequest reques
 {
     if (!IsAdmin(request)) return Results.Unauthorized();
     var body = await JsonSerializer.DeserializeAsync<JsonElement>(request.Body);
-    if (!body.TryGetProperty("holding", out var h))
-        return Results.BadRequest(new { error = "holding required" });
-    var n = Execute("UPDATE watchlist SET holding = @h WHERE symbol = @s AND enabled = 1",
-        ("@h", h.GetBoolean() ? 1 : 0), ("@s", symbol.ToUpperInvariant()));
+    var sets = new List<string>();
+    var args = new List<(string, object?)> { ("@s", symbol.ToUpperInvariant()) };
+    if (body.TryGetProperty("holding", out var h))
+    {
+        sets.Add("holding = @h");
+        args.Add(("@h", h.GetBoolean() ? 1 : 0));
+    }
+    if (body.TryGetProperty("autotrade", out var at))
+    {
+        sets.Add("autotrade = @a");
+        args.Add(("@a", at.GetBoolean() ? 1 : 0));
+    }
+    if (sets.Count == 0)
+        return Results.BadRequest(new { error = "holding oder autotrade erforderlich" });
+    var n = Execute($"UPDATE watchlist SET {string.Join(", ", sets)} WHERE symbol = @s AND enabled = 1",
+        args.ToArray());
     return n > 0 ? Results.NoContent() : Results.NotFound();
+});
+
+// Read-only Trading-Status: letzter Konto-Snapshot (vom Worker geschrieben),
+// Pott-Größe und die letzten Orders. enabled spiegelt das TRADING_ENABLED-Opt-in.
+app.MapGet("/api/trading", () =>
+{
+    var enabledRow = Query("SELECT value FROM meta WHERE key = 'trading_enabled'");
+    var enabled = enabledRow.Count > 0 && (string?)enabledRow[0]["value"] == "1";
+
+    var snapRows = Query("SELECT * FROM broker_snapshot ORDER BY as_of DESC LIMIT 1");
+    Dictionary<string, object?>? snapshot = null;
+    if (snapRows.Count > 0)
+    {
+        snapshot = snapRows[0];
+        snapshot["positions"] = ParseJson(snapshot["positions_json"]);
+        snapshot.Remove("positions_json");
+    }
+
+    var nAuto = Convert.ToInt64(Query(
+        "SELECT COUNT(*) c FROM watchlist WHERE enabled = 1 AND autotrade = 1")[0]["c"]!);
+    double? pot = null;
+    if (snapshot?["equity"] is double eq && nAuto > 0)
+        pot = Math.Round(eq / nAuto, 2);
+
+    var orders = Query("SELECT * FROM orders ORDER BY submitted_at DESC LIMIT 50");
+    return Results.Json(new Dictionary<string, object?>
+    {
+        ["enabled"] = enabled,
+        ["snapshot"] = snapshot,
+        ["autotrade_count"] = nAuto,
+        ["pot"] = pot,
+        ["orders"] = orders,
+    });
 });
 
 // --------------------------------------------------------------------------

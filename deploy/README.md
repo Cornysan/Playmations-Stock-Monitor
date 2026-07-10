@@ -32,6 +32,12 @@ sudo chown -R stocks:stocks /var/www/stocks /var/lib/stocks
 # /etc/stocks/env
 FRED_API_KEY=...        # optional, für den 10Y-2Y-Spread
 AdminPassword=...       # Admin-Login der Web-App (ohne: reiner View-Modus)
+
+# Auto-Trading (optional; ohne TRADING_ENABLED=1 wird nie gehandelt)
+ALPACA_KEY_ID=...
+ALPACA_SECRET_KEY=...
+TRADING_ENABLED=1
+# ALPACA_BASE_URL=https://paper-api.alpaca.markets   # Default: Paper. Live nur bewusst!
 ```
 
 Nach Änderungen an dieser Datei: `systemctl restart stocks-web stocks-worker`.

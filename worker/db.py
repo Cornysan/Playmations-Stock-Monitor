@@ -58,6 +58,31 @@ CREATE TABLE IF NOT EXISTS strategy_config (
   active      INTEGER NOT NULL DEFAULT 0
 );
 
+-- Auto-Trading: jede an Alpaca geschickte Order (auch fehlgeschlagene).
+-- client_order_id = "spm-{SYMBOL}-{YYYYMMDD}-{side}" → idempotent pro Tag.
+CREATE TABLE IF NOT EXISTS orders (
+  client_order_id  TEXT PRIMARY KEY,
+  alpaca_id        TEXT,
+  symbol           TEXT NOT NULL,
+  side             TEXT NOT NULL,            -- buy | sell
+  notional         REAL,                     -- Kauf: Dollar-Betrag; Verkauf: NULL (ganze Position)
+  submitted_at     TEXT NOT NULL,
+  status           TEXT NOT NULL,            -- accepted/new/filled/canceled/… oder error
+  filled_qty       REAL,
+  filled_avg_price REAL,
+  filled_at        TEXT,
+  error            TEXT
+);
+
+-- Konto-Zustand pro Run (Equity-Verlauf, Positions-Snapshot für die UI).
+CREATE TABLE IF NOT EXISTS broker_snapshot (
+  as_of          TEXT PRIMARY KEY,
+  equity         REAL,
+  cash           REAL,
+  buying_power   REAL,
+  positions_json TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_analysis_symbol_asof ON analysis(symbol, as_of DESC);
 """
 
@@ -79,6 +104,9 @@ def _migrate(con: sqlite3.Connection) -> None:
         con.execute("ALTER TABLE analysis ADD COLUMN strategy TEXT")
     if "signal" not in cols:
         con.execute("ALTER TABLE analysis ADD COLUMN signal TEXT")
+    wcols = {r["name"] for r in con.execute("PRAGMA table_info(watchlist)")}
+    if "autotrade" not in wcols:
+        con.execute("ALTER TABLE watchlist ADD COLUMN autotrade INTEGER NOT NULL DEFAULT 0")
     con.commit()
 
 
@@ -171,6 +199,51 @@ def write_macro(con: sqlite3.Connection, as_of: str, result) -> None:
             as_of, result.composite, result.regime, result.pillar_score,
             result.pillar_label, json.dumps(result.components), json.dumps(result.notes),
         ),
+    )
+    con.commit()
+
+
+# --- auto-trading ------------------------------------------------------------
+
+def autotrade_symbols(con: sqlite3.Connection) -> list[str]:
+    return [r["symbol"] for r in con.execute(
+        "SELECT symbol FROM watchlist WHERE enabled=1 AND autotrade=1 ORDER BY symbol")]
+
+
+def upsert_order(con: sqlite3.Connection, o: dict) -> None:
+    con.execute(
+        "INSERT INTO orders(client_order_id, alpaca_id, symbol, side, notional, "
+        "submitted_at, status, filled_qty, filled_avg_price, filled_at, error) "
+        "VALUES(:client_order_id, :alpaca_id, :symbol, :side, :notional, "
+        ":submitted_at, :status, :filled_qty, :filled_avg_price, :filled_at, :error) "
+        "ON CONFLICT(client_order_id) DO UPDATE SET "
+        "alpaca_id=excluded.alpaca_id, status=excluded.status, "
+        "filled_qty=excluded.filled_qty, filled_avg_price=excluded.filled_avg_price, "
+        "filled_at=excluded.filled_at, error=excluded.error",
+        {"alpaca_id": None, "notional": None, "filled_qty": None,
+         "filled_avg_price": None, "filled_at": None, "error": None, **o},
+    )
+    con.commit()
+
+
+def order_exists(con: sqlite3.Connection, client_order_id: str) -> bool:
+    return con.execute("SELECT 1 FROM orders WHERE client_order_id=?",
+                       (client_order_id,)).fetchone() is not None
+
+
+def open_orders(con: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Orders, deren Status noch nicht final ist (werden beim sync refresht)."""
+    return con.execute(
+        "SELECT * FROM orders WHERE status NOT IN "
+        "('filled','canceled','expired','rejected','error')").fetchall()
+
+
+def write_broker_snapshot(con: sqlite3.Connection, as_of: str, equity: float,
+                          cash: float, buying_power: float, positions: dict) -> None:
+    con.execute(
+        "INSERT OR REPLACE INTO broker_snapshot(as_of, equity, cash, buying_power, "
+        "positions_json) VALUES(?,?,?,?,?)",
+        (as_of, equity, cash, buying_power, json.dumps(positions)),
     )
     con.commit()
 

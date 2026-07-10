@@ -15,6 +15,11 @@ Selbstgehostetes Stock-Analyse-Dashboard. Voller Kontext: `docs/PROJEKTPLAN.md`.
   yfinance. Wird vom Web on-demand gespawnt (`list` bzw.
   `run SYMBOL --strategy … --params … --db …`), liefert Signale/Trades/Statistik
   als JSON auf stdout; Ergebnisse werden nicht persistiert (MemoryCache im Web).
+- `worker/broker.py` + `worker/trader.py` — Auto-Trading (Alpaca, Default Paper).
+  Pott-Modell: Equity / N Auto-Trade-Symbole, all-in/all-out je Symbol nach
+  `analysis.signal`. Opt-in via `TRADING_ENABLED=1` + Keys in `.env`; Idempotenz
+  über `client_order_id` (Tabellen `orders`, `broker_snapshot`). `holding` der
+  Auto-Trade-Symbole wird aus echten Alpaca-Positionen gesynct.
 - `web/` — ASP.NET Core (.NET 10) Minimal-API + statisches Frontend
   (`wwwroot/`, Alpine.js + Lightweight Charts v5, vendored). Liest die DB;
   schreibt nur `watchlist` (add/remove/holding) und `strategy_config`

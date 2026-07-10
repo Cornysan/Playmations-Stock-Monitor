@@ -346,6 +346,37 @@ Code-Editing in der UI — kein Remote-Code-Execution-Risiko):
 
 ---
 
+## 12. Auto-Trading via Alpaca Paper (Nachtrag Juli 2026)
+
+Die Signale der aktiven Strategie werden optional automatisch gehandelt —
+zunächst ausschließlich gegen einen Alpaca-**Paper**-Account (Live erfordert
+bewusst eine andere `ALPACA_BASE_URL`).
+
+- **Pott-Modell (Diversifikation):** `Pott = Konto-Equity / N` mit N = Anzahl
+  der Symbole mit `watchlist.autotrade=1` (UI-Toggle, admin). Pro Symbol
+  all-in/all-out: BUY im Flat → Notional-Market-Buy über den Pott (Bruchstücke),
+  SELL in Position → Market-Sell der ganzen Position. Basis ist die Equity,
+  nicht die gehebelte Margin-Buying-Power.
+- **Ablauf:** `trader.sync` (vor der Analyse) refresht Order-Status, setzt
+  `holding` der Auto-Trade-Symbole aus den echten Alpaca-Positionen und schreibt
+  `broker_snapshot`. `trader.trade` (nach der Analyse) platziert Orders — nach
+  US-Close eingereicht, füllt Alpaca sie zur nächsten Eröffnung. Bricht Yahoo
+  den Run ab (Rate-Limit), wird nicht gehandelt.
+- **Sicherungen:** Opt-in `TRADING_ENABLED=1`; `client_order_id` =
+  `spm-{SYMBOL}-{YYYYMMDD}-{side}` (idempotent, von Alpaca unique-enforced);
+  `MAX_ORDERS_PER_RUN` (Default 20); Broker-Fehler brechen nie die Analyse;
+  fehlgeschlagene Orders (z. B. OTC-Titel) landen mit Fehlertext in `orders`.
+- **Backtest-Angleichung:** Default-Ausführung jetzt `next_open` (wie Live);
+  `--execution close` bleibt als optimistischer Vergleichsmodus.
+- **API/UI:** `GET /api/trading` (Snapshot, Pott, Orderliste, enabled-Flag),
+  `PATCH /api/watchlist/{s}` mit `autotrade`; UI: Auto-Trade-Toggle in der
+  Detailansicht, gelber Punkt in der Watchlist, „Paper-Trading"-Accordion
+  (Equity/Cash/Pott + Orders) auf der Startseite.
+- **Secrets:** `ALPACA_KEY_ID`/`ALPACA_SECRET_KEY` in `.env` bzw.
+  `/etc/stocks/env` — nie ins Repo.
+
+---
+
 ## Anhang – Rollen der bestehenden Skripte
 
 - **`indicators.py`** – deterministische Indikator-Engine (EMA 20/50/200, RSI-14 Wilder,

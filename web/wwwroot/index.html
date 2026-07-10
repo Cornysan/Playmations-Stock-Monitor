@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>stocks.playmations.com</title>
-  <link rel="stylesheet" href="/css/app.css?v=4">
-  <script src="/js/app.js?v=4"></script>
+  <link rel="stylesheet" href="/css/app.css?v=5">
+  <script src="/js/app.js?v=5"></script>
   <script src="/js/lightweight-charts.standalone.production.js"></script>
   <script defer src="/js/alpine.min.js"></script>
 </head>
@@ -62,7 +62,7 @@
           <template x-for="r in sorted()" :key="r.symbol">
             <tr @click="select(r)" :class="{ selected: r.symbol === symbol }">
               <td class="sym-cell">
-                <span class="hold-dot" x-show="r.holding" title="im Depot"></span><span x-text="r.symbol"></span>
+                <span class="hold-dot" x-show="r.holding" title="im Depot"></span><span class="auto-dot" x-cloak x-show="r.autotrade" title="Auto-Trade aktiv"></span><span x-text="r.symbol"></span>
                 <div class="sub-name" x-text="r.name || ''"></div>
               </td>
               <td class="num">
@@ -83,6 +83,56 @@
           </template>
         </tbody>
       </table>
+
+      <!-- Paper-Trading-Status (Quelle: Worker-Snapshots + Order-Log) -->
+      <div class="acc" x-cloak x-show="trading">
+        <button @click="openTrading = !openTrading">
+          <span class="chev" :class="{ open: openTrading }">▶</span> Paper-Trading
+          <span class="summary" x-text="tradingSummary()"></span>
+        </button>
+        <div class="body" x-cloak x-show="openTrading">
+          <div class="bt-note" x-show="trading && !trading.enabled" style="margin:8px 0">
+            Trading deaktiviert (TRADING_ENABLED=0) — der Worker platziert keine Orders.
+          </div>
+          <template x-if="trading?.snapshot">
+            <div class="bt-grid">
+              <div class="bt-cell"><div class="bt-label">Equity</div>
+                <div class="bt-value" x-text="fmtUsd(trading.snapshot.equity)"></div></div>
+              <div class="bt-cell"><div class="bt-label">Cash</div>
+                <div class="bt-value" x-text="fmtUsd(trading.snapshot.cash)"></div></div>
+              <div class="bt-cell"><div class="bt-label">Positionen</div>
+                <div class="bt-value" x-text="Object.keys(trading.snapshot.positions || {}).length"></div></div>
+              <div class="bt-cell"><div class="bt-label">Auto-Trade</div>
+                <div class="bt-value" x-text="trading.autotrade_count + ' Titel'"></div></div>
+              <div class="bt-cell"><div class="bt-label">Pott / Titel</div>
+                <div class="bt-value" x-text="trading.pot != null ? fmtUsd(trading.pot) : '—'"></div></div>
+            </div>
+          </template>
+          <div class="bt-note" x-show="trading && !trading.snapshot" style="margin:8px 0">
+            Noch kein Konto-Snapshot — kommt mit dem nächsten Worker-Lauf.
+          </div>
+          <table class="trades" x-show="(trading?.orders || []).length">
+            <thead>
+              <tr><th>Zeit</th><th>Symbol</th><th>Side</th><th class="num">Betrag</th><th>Status</th><th class="num">Fill</th></tr>
+            </thead>
+            <tbody>
+              <template x-for="o in trading?.orders || []" :key="o.client_order_id">
+                <tr>
+                  <td x-text="fmtAsOf(o.submitted_at)"></td>
+                  <td class="sym-cell" x-text="o.symbol"></td>
+                  <td :class="o.side === 'buy' ? 'pos' : 'neg'" x-text="o.side.toUpperCase()"></td>
+                  <td class="num" x-text="o.notional != null ? fmtUsd(o.notional) : (o.filled_qty != null ? o.filled_qty + ' Stk.' : 'alles')"></td>
+                  <td :class="orderStatusClass(o)" :title="o.error || ''" x-text="o.error ? 'Fehler' : o.status"></td>
+                  <td class="num" x-text="o.filled_avg_price != null ? fmtPrice(o.filled_avg_price) : '—'"></td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+          <div class="flag-none" x-show="trading && !(trading.orders || []).length" style="margin-top:6px">
+            Noch keine Orders.
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- ================= rechte Spalte: Chart + Analyse ================= -->
@@ -100,6 +150,9 @@
           <button class="toggle" x-show="admin" :class="{ on: analysis?.holding }" @click="toggleHolding()"
                   title="Umschalten: bin ich hier investiert?"></button>
           <span x-text="analysis?.holding ? 'Im Depot (Holder-Framing)' : 'Nicht im Depot (Entry-Framing)'"></span>
+          <button class="toggle auto" x-show="admin" :class="{ on: analysis?.autotrade }" @click="toggleAutotrade()"
+                  title="Auto-Trade: Worker kauft/verkauft dieses Symbol automatisch nach Signal (Paper-Account)"></button>
+          <span x-show="admin" x-text="analysis?.autotrade ? 'Auto-Trade an' : 'Auto-Trade aus'"></span>
           <span class="stale" x-show="analysis"
                 x-text="'· Analyse vom ' + fmtAsOf(analysis?.as_of) + (analysis?.strategy ? ' · ' + analysis.strategy : '')"></span>
         </div>
@@ -183,9 +236,7 @@
                     </template>
                   </tbody>
                 </table>
-                <div class="bt-note"
-                     x-text="'Zeitraum ' + (backtest.meta?.from || '?') + ' – ' + (backtest.meta?.to || '?')
-                           + ' · Ausführung zum Signal-Close · ohne Gebühren/Slippage · Macro-Säule im Backtest nicht verfügbar'"></div>
+                <div class="bt-note" x-text="btNote()"></div>
               </div>
             </template>
           </div>
@@ -311,10 +362,12 @@ function watchlistApp() {
     admin: false,
     sortKey: "symbol",
     sortDir: 1,
+    trading: null,
+    openTrading: false,
     isDesktop: window.matchMedia("(min-width: 1000px)").matches,
 
     async init() {
-      await Promise.all([this.loadList(), this.loadMacro(), this.loadMe()]);
+      await Promise.all([this.loadList(), this.loadMacro(), this.loadMe(), this.loadTrading()]);
       if (this.isDesktop && this.rows?.length) {
         const pre = new URLSearchParams(location.search).get("s");
         const hit = pre && this.rows.find((r) => r.symbol.toUpperCase() === pre.toUpperCase());
@@ -332,6 +385,26 @@ function watchlistApp() {
     async loadMe() {
       const resp = await fetch("/api/me");
       if (resp.ok) this.admin = (await resp.json()).admin;
+    },
+    async loadTrading() {
+      const resp = await fetch("/api/trading");
+      if (resp.ok) this.trading = await resp.json();
+    },
+
+    tradingSummary() {
+      if (!this.trading) return "";
+      if (!this.trading.enabled) return "inaktiv";
+      const s = this.trading.snapshot;
+      if (!s) return "wartet auf ersten Lauf";
+      const parts = ["Equity " + fmtUsd(s.equity), this.trading.autotrade_count + " Titel"];
+      if (this.trading.pot != null) parts.push("Pott " + fmtUsd(this.trading.pot));
+      return parts.join(" · ");
+    },
+
+    orderStatusClass(o) {
+      if (o.error || o.status === "rejected" || o.status === "canceled") return "neg";
+      if (o.status === "filled") return "pos";
+      return "";
     },
 
     select(r) {

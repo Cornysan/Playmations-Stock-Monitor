@@ -42,6 +42,11 @@ function fmtPct(v, digits = 2) {
   return (v > 0 ? "+" : "") + v.toFixed(digits) + "%";
 }
 
+function fmtUsd(v) {
+  if (v == null) return "—";
+  return v.toLocaleString("de-DE", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " $";
+}
+
 // Top flags for the badge tooltip (2–3 strongest, see plan §8.1)
 function flagTooltip(flags) {
   if (!flags) return "";
@@ -224,8 +229,18 @@ function detailState() {
         position: s.type === "buy" ? "belowBar" : "aboveBar",
         color: s.type === "buy" ? "#26a69a" : "#ef5350",
         shape: s.type === "buy" ? "arrowUp" : "arrowDown",
-        text: s.type === "buy" ? "Buy" : "Sell",
+        // pending = Signal vom letzten Close, Ausführung steht noch aus
+        text: (s.type === "buy" ? "Buy" : "Sell") + (s.pending ? "*" : ""),
       })));
+    },
+
+    btNote() {
+      const m = this.backtest?.meta || {};
+      const exec = m.execution === "close"
+        ? "Ausführung zum Signal-Close" : "Ausführung zur nächsten Eröffnung (wie Live-Trading)";
+      return "Zeitraum " + (m.from || "?") + " – " + (m.to || "?") + " · " + exec
+        + " · ohne Gebühren/Slippage · Macro-Säule im Backtest nicht verfügbar"
+        + " · * = Signal wartet auf Ausführung";
     },
 
     async saveStrategy(setActive = false) {
@@ -281,6 +296,18 @@ function detailState() {
       });
       // Framing text still stems from the last run; the badge flips on the next worker run.
       if (resp.ok) this.analysis.holding = target ? 1 : 0;
+    },
+
+    async toggleAutotrade() {
+      const target = !this.analysis.autotrade;
+      if (target && !confirm(this.symbol + " automatisch handeln (Paper-Account)? "
+          + "Der Worker kauft/verkauft dann eigenständig nach Signal.")) return;
+      const resp = await fetch("/api/watchlist/" + encodeURIComponent(this.symbol), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ autotrade: target }),
+      });
+      if (resp.ok) this.analysis.autotrade = target ? 1 : 0;
     },
 
     flagSummary() {

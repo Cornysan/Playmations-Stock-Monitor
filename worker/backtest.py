@@ -8,8 +8,12 @@ funktioniert aber genauso von Hand:
   python backtest.py list                                    Strategien + Params-Schema
   python backtest.py run SYMBOL --strategy NAME [--params JSON] [--db PATH]
 
-Ausführungsmodell: Signal entsteht am Close von Bar t und wird zum SELBEN
-Close gefüllt. Eine Position, all-in/all-out, keine Gebühren/Slippage.
+Ausführungsmodell (--execution):
+  next_open (Default)  Signal am Close von Bar t → Fill zur Eröffnung von t+1.
+                       Entspricht dem Live-Trading (Worker läuft nach US-Close,
+                       Alpaca queued Market-Orders zur nächsten Eröffnung).
+  close                Fill zum Signal-Close selbst (optimistisch, alter Modus).
+Eine Position, all-in/all-out, keine Gebühren/Slippage (Alpaca: kommissionsfrei).
 Die Macro-Säule liegt historisch nicht vor — Strategien laufen hier mit
 macro_score=None.
 
@@ -27,20 +31,21 @@ import strategies
 WARMUP = 60  # gleiche Mindesthistorie wie main.analyze_symbols
 
 
-def load_bars(db_path, symbol: str) -> tuple[list[str], list[float]]:
+def load_bars(db_path, symbol: str) -> tuple[list[str], list, list[float]]:
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     try:
         rows = con.execute(
-            "SELECT date, close FROM bars WHERE symbol=? AND close IS NOT NULL "
+            "SELECT date, open, close FROM bars WHERE symbol=? AND close IS NOT NULL "
             "ORDER BY date",
             (symbol,),
         ).fetchall()
     finally:
         con.close()
-    return [r[0] for r in rows], [r[1] for r in rows]
+    return [r[0] for r in rows], [r[1] for r in rows], [r[2] for r in rows]
 
 
-def run_backtest(dates: list[str], closes: list[float], strat, params: dict) -> dict:
+def run_backtest(dates: list[str], opens: list, closes: list[float], strat,
+                 params: dict, execution: str = "next_open") -> dict:
     n = len(closes)
     signals: list[dict] = []
     trades: list[dict] = []
@@ -50,34 +55,74 @@ def run_backtest(dates: list[str], closes: list[float], strat, params: dict) -> 
     entry_date, entry_price, entry_idx = None, None, None
     eq, peak, max_dd = 1.0, 1.0, 0.0
     bars_in_market = 0
+    pending = None  # next_open: gestriges Signal, wird an der heutigen Eröffnung gefüllt
+
+    def open_or_close(i: int) -> float:
+        return opens[i] if opens[i] is not None else closes[i]
 
     for i in range(WARMUP, n):
-        # Position von gestern über den heutigen Bar tragen (Entscheidung folgt danach)
-        if in_pos:
-            eq *= closes[i] / closes[i - 1]
-            bars_in_market += 1
+        entered_at_open = False
 
-        card = strategies.run(strat, closes[: i + 1], holding=in_pos, params=params)
-        sig = card["signal"]
-
-        if sig == "BUY" and not in_pos:
-            in_pos = True
-            entry_date, entry_price, entry_idx = dates[i], closes[i], i
-            signals.append({"date": dates[i], "type": "buy", "price": closes[i]})
-        elif sig == "SELL" and in_pos:
+        # 1. next_open: gestriges Signal zur heutigen Eröffnung ausführen
+        if pending == "buy" and not in_pos:
+            px = open_or_close(i)
+            in_pos, entered_at_open = True, True
+            entry_date, entry_price, entry_idx = dates[i], px, i
+            signals.append({"date": dates[i], "type": "buy", "price": px})
+        elif pending == "sell" and in_pos:
+            px = open_or_close(i)
+            eq *= px / closes[i - 1]
             in_pos = False
             trades.append({
                 "entry_date": entry_date, "entry_price": entry_price,
-                "exit_date": dates[i], "exit_price": closes[i],
-                "pnl_pct": round((closes[i] / entry_price - 1) * 100, 2),
+                "exit_date": dates[i], "exit_price": px,
+                "pnl_pct": round((px / entry_price - 1) * 100, 2),
                 "bars_held": i - entry_idx,
                 "open": False,
             })
-            signals.append({"date": dates[i], "type": "sell", "price": closes[i]})
+            signals.append({"date": dates[i], "type": "sell", "price": px})
+        pending = None
+
+        # 2. Equity über den heutigen Bar fortschreiben
+        if entered_at_open:
+            eq *= closes[i] / entry_price
+            bars_in_market += 1
+        elif in_pos:
+            eq *= closes[i] / closes[i - 1]
+            bars_in_market += 1
+
+        # 3. Entscheidung auf dem heutigen Close
+        card = strategies.run(strat, closes[: i + 1], holding=in_pos, params=params)
+        sig = card["signal"]
+
+        # 4. Ausführung: sofort (close) oder morgen früh (next_open)
+        if execution == "close":
+            if sig == "BUY" and not in_pos:
+                in_pos = True
+                entry_date, entry_price, entry_idx = dates[i], closes[i], i
+                signals.append({"date": dates[i], "type": "buy", "price": closes[i]})
+            elif sig == "SELL" and in_pos:
+                in_pos = False
+                trades.append({
+                    "entry_date": entry_date, "entry_price": entry_price,
+                    "exit_date": dates[i], "exit_price": closes[i],
+                    "pnl_pct": round((closes[i] / entry_price - 1) * 100, 2),
+                    "bars_held": i - entry_idx,
+                    "open": False,
+                })
+                signals.append({"date": dates[i], "type": "sell", "price": closes[i]})
+        else:
+            if (sig == "BUY" and not in_pos) or (sig == "SELL" and in_pos):
+                pending = sig.lower()
 
         peak = max(peak, eq)
         max_dd = max(max_dd, 1.0 - eq / peak)
         equity.append({"date": dates[i], "value": round(eq, 6)})
+
+    # next_open: Signal vom letzten Bar wartet noch auf seine Ausführung
+    if pending is not None:
+        signals.append({"date": dates[-1], "type": pending, "price": None,
+                        "pending": True})
 
     if in_pos:  # offene Position mark-to-market
         trades.append({
@@ -126,14 +171,14 @@ def cmd_run(args) -> int:
         return 1
 
     symbol = args.symbol.upper()
-    dates, closes = load_bars(args.db or config.DB_PATH, symbol)
+    dates, opens, closes = load_bars(args.db or config.DB_PATH, symbol)
     if len(closes) <= WARMUP:
         print(json.dumps({"error": f"zu wenig Bars für {symbol} "
                                    f"({len(closes)}, benötigt >{WARMUP})"}))
         return 1
 
     resolved = strategies.resolve_params(strat, params)
-    result = run_backtest(dates, closes, strat, resolved)
+    result = run_backtest(dates, opens, closes, strat, resolved, args.execution)
     result["meta"] = {
         "symbol": symbol,
         "strategy": strat.NAME,
@@ -141,7 +186,7 @@ def cmd_run(args) -> int:
         "from": dates[WARMUP],
         "to": dates[-1],
         "n_bars": len(closes),
-        "execution": "signal close",
+        "execution": args.execution,
         "macro": None,
     }
     print(json.dumps(result, ensure_ascii=False))
@@ -156,6 +201,8 @@ def main() -> int:
     run_p.add_argument("symbol")
     run_p.add_argument("--strategy", default=strategies.DEFAULT)
     run_p.add_argument("--params", help="JSON-Objekt mit Param-Overrides")
+    run_p.add_argument("--execution", choices=["next_open", "close"],
+                       default="next_open")
     run_p.add_argument("--db", help="Pfad zur SQLite-DB (Default: config.DB_PATH)")
     args = ap.parse_args()
 

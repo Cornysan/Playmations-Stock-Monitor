@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Symbol · stocks.playmations.com</title>
-  <link rel="stylesheet" href="/css/app.css?v=4">
-  <script src="/js/app.js?v=4"></script>
+  <link rel="stylesheet" href="/css/app.css?v=5">
+  <script src="/js/app.js?v=5"></script>
   <script src="/js/lightweight-charts.standalone.production.js"></script>
   <script defer src="/js/alpine.min.js"></script>
   <script>
@@ -42,6 +42,9 @@
     <button class="toggle" x-show="admin" :class="{ on: analysis?.holding }" @click="toggleHolding()"
             title="Umschalten: bin ich hier investiert?"></button>
     <span x-text="analysis?.holding ? 'Im Depot (Holder-Framing)' : 'Nicht im Depot (Entry-Framing)'"></span>
+    <button class="toggle auto" x-show="admin" :class="{ on: analysis?.autotrade }" @click="toggleAutotrade()"
+            title="Auto-Trade: Worker kauft/verkauft dieses Symbol automatisch nach Signal (Paper-Account)"></button>
+    <span x-show="admin" x-text="analysis?.autotrade ? 'Auto-Trade an' : 'Auto-Trade aus'"></span>
     <span class="stale" x-show="analysis"
           x-text="'· Analyse vom ' + fmtAsOf(analysis?.as_of) + (analysis?.strategy ? ' · ' + analysis.strategy : '')"></span>
   </div>
@@ -128,9 +131,7 @@
               </template>
             </tbody>
           </table>
-          <div class="bt-note"
-               x-text="'Zeitraum ' + (backtest.meta?.from || '?') + ' – ' + (backtest.meta?.to || '?')
-                     + ' · Ausführung zum Signal-Close · ohne Gebühren/Slippage · Macro-Säule im Backtest nicht verfügbar'"></div>
+          <div class="bt-note" x-text="btNote()"></div>
         </div>
       </template>
     </div>
