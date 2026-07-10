@@ -27,8 +27,10 @@ FRED_API_KEY = os.environ.get("FRED_API_KEY", "")
 # ETFs consumed by macro_pillar.score_macro (one fetch per day, shared by all symbols)
 MACRO_ETFS = ["SPY", "RSP", "IWM", "HYG", "LQD", "TLT", "XLY", "XLP"]
 
-# ~420 calendar days ≈ 290 trading days → enough for EMA200 + slope warmup
-LOOKBACK_DAYS = int(os.environ.get("LOOKBACK_DAYS", "420"))
+# ~5 Jahre + Puffer: Walk-Forward/Sweeps brauchen lange Zeiträume. Die Analyse
+# selbst liest weiterhin nur die letzten ~320 Closes (db.closes limit) — mehr
+# Historie kostet also nur Backtest-Laufzeit, nicht den Tagesrun.
+LOOKBACK_DAYS = int(os.environ.get("LOOKBACK_DAYS", "1900"))
 # When updating incrementally, re-fetch the last few days to pick up corrections
 INCREMENTAL_OVERLAP_DAYS = 7
 

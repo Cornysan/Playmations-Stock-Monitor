@@ -43,12 +43,16 @@ def update_bars(con, symbols: list[str]) -> None:
     today = dt.date.today()
     full_lookback = today - dt.timedelta(days=config.LOOKBACK_DAYS)
 
-    fresh: list[str] = []          # nothing cached yet → full lookback
+    fresh: list[str] = []          # nothing cached / lookback grew → full window
     incremental: list[str] = []    # cached → only the recent tail
     inc_start = today
     for sym in symbols:
         last = db.last_bar_date(con, sym)
-        if last is None:
+        # Backfill-Marker: mit welchem LOOKBACK_DAYS-Fenster wurde das Symbol
+        # zuletzt voll geladen? Wird das Fenster in config vergrößert, holt der
+        # nächste Run die fehlende Alt-Historie selbstständig nach.
+        loaded = int(db.get_meta(con, f"backfill_1d:{sym}") or 0)
+        if last is None or loaded < config.LOOKBACK_DAYS:
             fresh.append(sym)
         else:
             start = dt.date.fromisoformat(last) - dt.timedelta(days=config.INCREMENTAL_OVERLAP_DAYS)
@@ -64,6 +68,8 @@ def update_bars(con, symbols: list[str]) -> None:
             if rows:
                 n = db.upsert_bars(con, sym, rows)
                 log.info("%s: %d bars upserted", sym, n)
+                if group is fresh:
+                    db.set_meta(con, f"backfill_1d:{sym}", str(config.LOOKBACK_DAYS))
             else:
                 log.warning("%s: no data returned (keeping last good state)", sym)
 

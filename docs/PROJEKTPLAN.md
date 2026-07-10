@@ -340,6 +340,17 @@ Code-Editing in der UI — kein Remote-Code-Execution-Risiko):
 - **Slippage:** `--slippage-bps` (Default 5 = 0,05 % je Fill-Seite) verschlechtert
   jeden Fill — Käufe teurer, Verkäufe/Stops billiger; der Buy&Hold-Vergleich zahlt
   seinen Einstiegs-Fill mit. 0 = idealisierte alte Rechnung. UI-Feld „Slip bp".
+- **Historie & Sweep (Nachtrag):** Tagesbars werden 5 Jahre vorgehalten
+  (`LOOKBACK_DAYS=1900`; `update_bars` merkt sich per Meta-Key
+  `backfill_1d:{sym}`, mit welchem Fenster ein Symbol voll geladen wurde —
+  ein Config-Bump backfillt beim nächsten Run automatisch). Die Analyse liest
+  weiterhin nur die letzten ~320 Closes; lange Historie kostet nur
+  Backtest-Laufzeit. `backtest.py sweep SYMBOL --split 0.7 [--grid JSON]`
+  fährt einen Parameter-Sweep (Default: bis zu 8 Werte je Param aus dem
+  PARAMS-Schema, Kappung bei 500 Kombinationen) mit Train/Test-Split:
+  Ranking nach dem Trainings-Zeitraum, daneben das Out-of-Sample-Ergebnis
+  samt `test_rank`. Großer Abstand Train-Rang ↔ Test-Rang = Overfitting;
+  gesund ist ein flaches Plateau ähnlicher Params. CLI-only (kein Web-Endpoint).
 - **Portfolio-Backtest:** `backtest.py portfolio [--symbols A,B,…]` (Default:
   Watchlist aus der DB) simuliert das Pott-Modell aus `trader.py` — ein
   Cash-Topf, Pott = Equity/N, Buys = min(Pott, Cash), all-in/all-out je Symbol,
@@ -352,7 +363,8 @@ Code-Editing in der UI — kein Remote-Code-Execution-Risiko):
   aktiv setzen), `GET /api/symbols/{s}/backtest?strategy=&params=&risk=&slippage=`
   (alles wird gegen Schema/Grenzen validiert, bevor es den Python-Spawn erreicht),
   `GET /api/portfolio/backtest?strategy=&params=&tf=&risk=&slippage=` (ganze
-  Watchlist, 120-s-Timeout statt 30 s).
+  Watchlist, 300-s-Timeout statt 30 s — three_pillars × 100 Symbole × 5 Jahre
+  braucht ~2 min).
 - **UI:** Strategie-Dropdown + Parameter-Inputs überm Chart (Änderung → Backtest neu),
   Buy/Sell-Marker im Chart, Backtest-Accordion mit Statistik-Grid + Trade-Liste.
   Admin-Buttons „Speichern" / „Aktiv setzen". Startseite: Accordion

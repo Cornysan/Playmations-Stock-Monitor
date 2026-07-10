@@ -10,6 +10,9 @@ funktioniert aber genauso von Hand:
                      [--timeframe 1d|1h]
   python backtest.py portfolio [--symbols A,B,C] …           Pott-Modell über
                      mehrere Symbole (Default: die Watchlist aus der DB)
+  python backtest.py sweep SYMBOL [--split 0.7] [--grid JSON] …
+                     Parameter-Sweep mit Train/Test-Split: Grid optimieren auf
+                     dem Trainings-Teil, blind auswerten auf dem Test-Teil
 
 Ausführungsmodell (--execution):
   next_open (Default)  Signal am Close von Bar t → Fill zur Eröffnung von t+1.
@@ -27,6 +30,7 @@ stdlib only, DB strikt read-only (mode=ro), importiert kein fetch/yfinance.
 """
 from __future__ import annotations
 import argparse
+import itertools
 import json
 import sqlite3
 import sys
@@ -35,6 +39,7 @@ import config
 import strategies
 
 WARMUP = 60  # gleiche Mindesthistorie wie main.analyze_symbols
+MAX_SWEEP_COMBOS = 500  # Schutz gegen explodierende Grids (→ --grid eingrenzen)
 
 
 def load_bars(db_path, symbol: str, timeframe: str = "1d"):
@@ -560,6 +565,160 @@ def cmd_portfolio(args) -> int:
     return 0
 
 
+def _axis_values(spec: dict, max_values: int = 8) -> list[float]:
+    """Bis zu `max_values` Werte je Parameter, gleichmäßig über min..max auf
+    dem step-Raster verteilt (Default-Grid, wenn kein --grid angegeben ist)."""
+    lo, hi = spec["min"], spec["max"]
+    step = spec.get("step") or 1
+    count = int(round((hi - lo) / step)) + 1
+    if count <= max_values:
+        vals = [lo + k * step for k in range(count)]
+    else:
+        vals = sorted({lo + round((hi - lo) * k / (max_values - 1) / step) * step
+                       for k in range(max_values)})
+    return [round(v, 10) for v in vals]
+
+
+def build_grid(strat, grid_raw: str | None, base_params: dict) -> list[dict]:
+    """Parameter-Kombinationen für den Sweep. --grid = JSON {param: [Werte,…]};
+    nicht gelistete Params bleiben auf dem Basis-/Default-Wert. Ohne --grid
+    wird das PARAMS-Schema mit bis zu 8 Werten je Achse abgetastet."""
+    schema = getattr(strat, "PARAMS", {})
+    if grid_raw:
+        grid = json.loads(grid_raw)
+        if not isinstance(grid, dict) or not grid:
+            raise ValueError("grid muss ein JSON-Objekt {param: [Werte,…]} sein")
+        unknown = set(grid) - set(schema)
+        if unknown:
+            raise ValueError(f"grid: unbekannte Params {sorted(unknown)}")
+        axes = {}
+        for key, vals in grid.items():
+            if not isinstance(vals, list):
+                vals = [vals]
+            if not vals or not all(isinstance(v, (int, float)) for v in vals):
+                raise ValueError(f"grid[{key}]: Liste von Zahlen erwartet")
+            axes[key] = [float(v) for v in vals]
+    else:
+        axes = {key: _axis_values(spec) for key, spec in schema.items()}
+
+    base = strategies.resolve_params(strat, base_params)
+    if not axes:  # parameterlose Strategie: eine Zelle (reiner Train/Test-Check)
+        return [base]
+
+    combos, seen = [], set()
+
+    def add(params: dict) -> None:
+        key = json.dumps(params, sort_keys=True)
+        if key not in seen:
+            seen.add(key)
+            combos.append(params)
+
+    add(base)  # Basis-/Default-Kombination immer mit im Rennen
+    names = sorted(axes)
+    for values in itertools.product(*(axes[k] for k in names)):
+        add(strategies.resolve_params(strat, {**base_params, **dict(zip(names, values))}))
+    return combos
+
+
+def cmd_sweep(args) -> int:
+    try:
+        strat, base, risk, slippage = _parse_common(args)
+        if not 0.5 <= args.split <= 0.9:
+            raise ValueError("split muss zwischen 0.5 und 0.9 liegen")
+        combos = build_grid(strat, args.grid, base)
+    except ValueError as e:
+        print(json.dumps({"error": str(e)}, ensure_ascii=False))
+        return 1
+    if len(combos) > MAX_SWEEP_COMBOS:
+        print(json.dumps({"error": f"Grid hat {len(combos)} Kombinationen "
+                                   f"(Maximum {MAX_SWEEP_COMBOS}) — mit --grid eingrenzen"}))
+        return 1
+
+    symbol = args.symbol.upper()
+    dates, opens, highs, lows, closes = load_bars(
+        args.db or config.DB_PATH, symbol, args.timeframe)
+    n = len(closes)
+    split_idx = WARMUP + int(round((n - WARMUP) * args.split))
+    if split_idx - WARMUP < 40 or n - split_idx < 40:
+        print(json.dumps({"error": f"zu wenig Bars für einen {args.split:.0%}-Split "
+                                   f"({n} Bars, je Segment mindestens 40 nach Warmup)"},
+                         ensure_ascii=False))
+        return 1
+    split_date = dates[split_idx]
+    slip = slippage / 10000.0
+
+    def drawdown(values, start_peak: float) -> float:
+        peak, worst = start_peak, 0.0
+        for v in values:
+            peak = max(peak, v)
+            worst = max(worst, 1.0 - v / peak)
+        return worst
+
+    def trade_stats(trades: list[dict]) -> tuple[int, float | None]:
+        wins = [t for t in trades if t["pnl_pct"] > 0]
+        return len(trades), (round(len(wins) / len(trades) * 100, 1) if trades else None)
+
+    results = []
+    pos = split_idx - WARMUP  # Equity-Index der Split-Grenze (equity[k] ↔ Bar WARMUP+k)
+    for i, params in enumerate(combos, 1):
+        r = run_backtest(dates, opens, highs, lows, closes, strat, params,
+                         "next_open", risk, slippage)
+        equity = [e["value"] for e in r["equity"]]
+        eq_split, eq_final = equity[pos - 1], equity[-1]
+        closed = [t for t in r["trades"] if not t["open"]]
+        tr = [t for t in closed if t["exit_date"] < split_date]
+        te = [t for t in closed if t["exit_date"] >= split_date]
+        n_tr, win_tr = trade_stats(tr)
+        n_te, win_te = trade_stats(te)
+        results.append({
+            "params": params,
+            "train": {"return_pct": round((eq_split - 1) * 100, 2),
+                      "max_drawdown_pct": round(drawdown(equity[:pos], 1.0) * 100, 2),
+                      "n_trades": n_tr, "win_rate_pct": win_tr},
+            "test": {"return_pct": round((eq_final / eq_split - 1) * 100, 2),
+                     "max_drawdown_pct": round(drawdown(equity[pos:], eq_split) * 100, 2),
+                     "n_trades": n_te, "win_rate_pct": win_te},
+        })
+        if i % 10 == 0 or i == len(combos):
+            print(f"sweep {symbol}: {i}/{len(combos)}", file=sys.stderr)
+
+    # Ranking: In-Sample-Sieger zuerst; test_rank zeigt, wo die Kombination
+    # out-of-sample gelandet wäre (großer Abstand = Overfitting-Signal).
+    results.sort(key=lambda r: r["train"]["return_pct"], reverse=True)
+    for rank, idx in enumerate(sorted(range(len(results)),
+                                      key=lambda i: results[i]["test"]["return_pct"],
+                                      reverse=True), 1):
+        results[idx]["test_rank"] = rank
+
+    out = {
+        "results": results,
+        "meta": {
+            "symbol": symbol,
+            "strategy": strat.NAME,
+            "timeframe": args.timeframe,
+            "execution": "next_open",
+            "risk": risk or None,
+            "slippage_bps": slippage,
+            "split": args.split,
+            "split_date": split_date,
+            "from": dates[WARMUP],
+            "to": dates[-1],
+            "n_bars": n,
+            "train_bars": split_idx - WARMUP,
+            "test_bars": n - split_idx,
+            "n_combos": len(combos),
+            "buy_hold": {
+                "train_pct": round((closes[split_idx - 1]
+                                    / (closes[WARMUP] * (1 + slip)) - 1) * 100, 2),
+                "test_pct": round((closes[-1]
+                                   / (closes[split_idx - 1] * (1 + slip)) - 1) * 100, 2),
+            },
+        },
+    }
+    print(json.dumps(out, ensure_ascii=False))
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Strategy backtester (JSON output).")
     sub = ap.add_subparsers(dest="command", required=True)
@@ -588,10 +747,22 @@ def main() -> int:
     pf_p.add_argument("--symbols", help="Kommagetrennt; Default: Watchlist aus der DB")
     add_common(pf_p)
 
+    sw_p = sub.add_parser("sweep", help="Parameter-Sweep mit Train/Test-Split "
+                                        "(Optimieren auf Train, blind auswerten auf Test)")
+    sw_p.add_argument("symbol")
+    sw_p.add_argument("--split", type=float, default=0.7,
+                      help="Anteil Trainings-Zeitraum (0.5–0.9, Default 0.7)")
+    sw_p.add_argument("--grid", help='JSON {param: [Werte,…]} — Default: bis zu '
+                                     "8 Werte je Param aus dem PARAMS-Schema; "
+                                     "--params fixiert nicht gelistete Params")
+    add_common(sw_p)
+
     args = ap.parse_args()
     if args.command == "list":
         print(json.dumps(strategies.list_all(), ensure_ascii=False))
         return 0
+    if args.command == "sweep":
+        return cmd_sweep(args)
     return cmd_portfolio(args) if args.command == "portfolio" else cmd_run(args)
 
 

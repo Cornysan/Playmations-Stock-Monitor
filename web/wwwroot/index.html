@@ -148,7 +148,7 @@
             Panel rechts (<span x-text="tf === '1h' ? 'Stundenkerzen' : 'Tageskerzen'"></span>).
           </div>
           <button class="mini-btn accent" @click="runPortfolio()" :disabled="pfLoading"
-                  x-text="pfLoading ? 'läuft… (kann eine Minute dauern)' : 'Backtest über die Watchlist starten'"></button>
+                  x-text="pfLoading ? 'läuft… (kann einige Minuten dauern)' : 'Backtest über die Watchlist starten'"></button>
           <div class="bt-error" x-show="pfError" x-text="pfError"></div>
           <template x-if="pf">
             <div>

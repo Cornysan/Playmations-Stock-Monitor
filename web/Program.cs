@@ -660,7 +660,8 @@ app.MapGet("/api/portfolio/backtest", async (string? strategy, string? @params, 
         "--db", dbPath };
     if (riskCanonical is not null) { pfArgs.Add("--risk"); pfArgs.Add(riskCanonical); }
     if (slipCanonical is not null) { pfArgs.Add("--slippage-bps"); pfArgs.Add(slipCanonical); }
-    var (code, stdout, stderr) = await RunPython(pfArgs.ToArray(), timeoutSeconds: 120);
+    // three_pillars über ~100 Symbole × 5 Jahre braucht ~2 min (O(n²) je Symbol)
+    var (code, stdout, stderr) = await RunPython(pfArgs.ToArray(), timeoutSeconds: 300);
     if (code != 0)
     {
         app.Logger.LogError("Portfolio-Backtest {Strategy} fehlgeschlagen ({Code}): {Err}",

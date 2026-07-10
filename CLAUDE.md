@@ -24,6 +24,11 @@ Selbstgehostetes Stock-Analyse-Dashboard. Voller Kontext: `docs/PROJEKTPLAN.md`.
   liefert Signale/Trades/Statistik als JSON auf stdout; Ergebnisse werden
   nicht persistiert (MemoryCache im Web). `--slippage-bps` (Default 5 je
   Fill-Seite, auch für den Buy&Hold-Einstieg) hält die Zahlen ehrlich; 0 = aus.
+  `sweep SYMBOL --split 0.7 [--grid JSON]` (CLI-only) = Parameter-Sweep mit
+  Train/Test-Split gegen Overfitting: Grid auf dem Train-Teil ranken, blind auf
+  dem Test-Teil auswerten (`test_rank` weit unter Train-Rang = überangepasst).
+  Tagesbars liegen 5 Jahre zurück (`LOOKBACK_DAYS`, Backfill-Marker
+  `meta backfill_1d:*` — Fenster-Bump heilt sich beim nächsten Run selbst).
 - `worker/broker.py` + `worker/trader.py` — Auto-Trading (Alpaca, Default Paper).
   Pott-Modell: Equity / N Auto-Trade-Symbole, all-in/all-out je Symbol nach
   `analysis.signal`. Opt-in via `TRADING_ENABLED=1` + Keys in `.env`;
