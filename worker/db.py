@@ -126,6 +126,9 @@ def _migrate(con: sqlite3.Connection) -> None:
         con.execute("ALTER TABLE watchlist ADD COLUMN strat_name TEXT")
         con.execute("ALTER TABLE watchlist ADD COLUMN strat_params TEXT")
         con.execute("ALTER TABLE watchlist ADD COLUMN strat_timeframe TEXT")
+    if "strat_risk" not in wcols:
+        # Risk-Overlay des Locks: {"stop_loss_pct":…, "trail_pct":…} oder NULL
+        con.execute("ALTER TABLE watchlist ADD COLUMN strat_risk TEXT")
     # strategy_config: alte Ein-Spalten-PK-Tabelle (nur name) auf (name, timeframe)
     # umbauen; Bestandszeilen waren faktisch Tages-Konfiguration.
     scols = {r["name"] for r in con.execute("PRAGMA table_info(strategy_config)")}
@@ -214,6 +217,15 @@ def closes_1h(con: sqlite3.Connection, symbol: str, limit: int = 320) -> list[fl
         (symbol, limit),
     ).fetchall()
     return [r["close"] for r in reversed(rows)]
+
+
+def last_close(con: sqlite3.Connection, symbol: str, timeframe: str = "1d") -> float | None:
+    sql = ("SELECT close FROM bars_1h WHERE symbol=? AND close IS NOT NULL "
+           "ORDER BY ts DESC LIMIT 1") if timeframe == "1h" else \
+          ("SELECT close FROM bars WHERE symbol=? AND close IS NOT NULL "
+           "ORDER BY date DESC LIMIT 1")
+    row = con.execute(sql, (symbol,)).fetchone()
+    return row["close"] if row else None
 
 
 # --- analysis / macro ------------------------------------------------------
@@ -308,6 +320,30 @@ def open_orders(con: sqlite3.Connection) -> list[sqlite3.Row]:
     return con.execute(
         "SELECT * FROM orders WHERE status NOT IN "
         "('filled','canceled','expired','rejected','error')").fetchall()
+
+
+def open_protection_order(con: sqlite3.Connection, symbol: str) -> sqlite3.Row | None:
+    """Offene Schutz-Order (Trailing-/Fixed-Stop) eines Symbols, falls vorhanden."""
+    return con.execute(
+        "SELECT * FROM orders WHERE symbol=? AND side='sell' "
+        "AND (client_order_id LIKE '%-trail' OR client_order_id LIKE '%-stopl') "
+        "AND status NOT IN ('filled','canceled','expired','rejected','error') "
+        "LIMIT 1", (symbol,)).fetchone()
+
+
+def autotrade_risk(con: sqlite3.Connection) -> dict[str, dict]:
+    """{symbol: risk-dict} aller Auto-Trade-Symbole mit Risk-Overlay im Lock."""
+    out = {}
+    for r in con.execute(
+            "SELECT symbol, strat_risk FROM watchlist "
+            "WHERE enabled=1 AND autotrade=1 AND strat_risk IS NOT NULL"):
+        try:
+            risk = json.loads(r["strat_risk"])
+        except ValueError:
+            continue
+        if isinstance(risk, dict) and (risk.get("stop_loss_pct") or risk.get("trail_pct")):
+            out[r["symbol"]] = risk
+    return out
 
 
 def write_broker_snapshot(con: sqlite3.Connection, as_of: str, equity: float,

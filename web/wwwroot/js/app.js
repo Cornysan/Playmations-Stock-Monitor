@@ -86,6 +86,9 @@ function detailState() {
     strategiesTf: null,   // Timeframe, für den `strategies` geladen wurde
     stratName: null,
     stratParams: {},
+    // Risk-Overlay (leer = aus): wird im Backtest intra-Kerze simuliert und
+    // beim Auto-Trade-Lock als echte Alpaca-Stop-Order mit eingefroren.
+    risk: { stop_loss_pct: null, trail_pct: null },
     backtest: null,
     backtestError: null,
     btLoading: false,
@@ -239,15 +242,26 @@ function detailState() {
       if (reload) this.loadBacktest();
     },
 
+    riskObject() {
+      const out = {};
+      for (const k of ["stop_loss_pct", "trail_pct"]) {
+        const v = this.risk[k];
+        if (typeof v === "number" && v > 0) out[k] = v;
+      }
+      return out;
+    },
+
     async loadBacktest() {
       if (!this.symbol || !this.stratName) return;
       const requested = this.symbol;
       this.btLoading = true;
       this.backtestError = null;
+      const riskObj = this.riskObject();
       const url = "/api/symbols/" + encodeURIComponent(requested) + "/backtest"
         + "?strategy=" + encodeURIComponent(this.stratName)
         + "&tf=" + this.tf
-        + "&params=" + encodeURIComponent(JSON.stringify(this.stratParams));
+        + "&params=" + encodeURIComponent(JSON.stringify(this.stratParams))
+        + (Object.keys(riskObj).length ? "&risk=" + encodeURIComponent(JSON.stringify(riskObj)) : "");
       const resp = await fetch(url);
       if (requested !== this.symbol) return; // Nutzer hat inzwischen gewechselt
       this.btLoading = false;
@@ -270,10 +284,12 @@ function detailState() {
       this.markersApi.setMarkers(sigs.map((s) => ({
         time: s.time,
         position: s.type === "buy" ? "belowBar" : "aboveBar",
-        color: s.type === "buy" ? "#26a69a" : "#ef5350",
+        // Stop-/Trail-Exits orange, damit sie von Signal-Sells unterscheidbar sind
+        color: s.type === "buy" ? "#26a69a" : s.reason ? "#e3b341" : "#ef5350",
         shape: s.type === "buy" ? "arrowUp" : "arrowDown",
         // pending = Signal vom letzten Close, Ausführung steht noch aus
-        text: (s.type === "buy" ? "Buy" : "Sell") + (s.pending ? "*" : ""),
+        text: (s.type === "buy" ? "Buy" : s.reason === "trail" ? "Trail"
+              : s.reason === "stop" ? "Stop" : "Sell") + (s.pending ? "*" : ""),
       })));
     },
 
@@ -282,8 +298,13 @@ function detailState() {
       const exec = m.execution === "close"
         ? "Ausführung zum Signal-Close" : "Ausführung zur nächsten Eröffnung (wie Live-Trading)";
       const tfLabel = m.timeframe === "1h" ? "Stundenkerzen" : "Tageskerzen";
+      const risk = m.risk
+        ? " · Risk: " + [m.risk.stop_loss_pct != null ? "Stop " + m.risk.stop_loss_pct + "%" : null,
+                         m.risk.trail_pct != null ? "Trail " + m.risk.trail_pct + "%" : null]
+            .filter(Boolean).join(" + ") + " (intra-Kerze simuliert)"
+        : "";
       return "Zeitraum " + (m.from || "?") + " – " + (m.to || "?") + " · " + tfLabel
-        + " · " + exec
+        + " · " + exec + risk
         + " · ohne Gebühren/Slippage · Macro-Säule im Backtest nicht verfügbar"
         + " · * = Signal wartet auf Ausführung";
     },
@@ -343,11 +364,17 @@ function detailState() {
       if (resp.ok) this.analysis.holding = target ? 1 : 0;
     },
 
-    // Anzeige des Auto-Trade-Zustands inkl. eingelockter Strategie
+    // Anzeige des Auto-Trade-Zustands inkl. eingelockter Strategie + Risk
     autotradeLabel() {
       if (!this.analysis?.autotrade) return "Auto-Trade aus";
       const s = this.analysis.strat_name || "aktive Strategie";
-      return "Auto-Trade an · " + s + " @ " + (this.analysis.strat_timeframe || "1d");
+      const r = this.analysis.strat_risk;
+      const riskTxt = r
+        ? " · " + [r.stop_loss_pct != null ? "Stop " + r.stop_loss_pct + "%" : null,
+                   r.trail_pct != null ? "Trail " + r.trail_pct + "%" : null]
+            .filter(Boolean).join(" + ")
+        : "";
+      return "Auto-Trade an · " + s + " @ " + (this.analysis.strat_timeframe || "1d") + riskTxt;
     },
 
     async toggleAutotrade() {
@@ -355,19 +382,25 @@ function detailState() {
       const body = { autotrade: target };
       if (target) {
         // Lock-in: genau die Konfiguration einfrieren, die gerade im
-        // Backtest eingestellt ist (Strategie + Params + Timeframe).
+        // Backtest eingestellt ist (Strategie + Params + Timeframe + Risk).
         const label = this.currentStrategy()?.label || this.stratName;
         const paramsTxt = Object.entries(this.stratParams)
           .map(([k, v]) => k + "=" + v).join(", ");
+        const riskObj = this.riskObject();
+        const riskTxt = [riskObj.stop_loss_pct ? "Stop-Loss " + riskObj.stop_loss_pct + "%" : null,
+                         riskObj.trail_pct ? "Trailing-Stop " + riskObj.trail_pct + "%" : null]
+          .filter(Boolean).join(" + ");
         if (!confirm(this.symbol + " automatisch handeln (Paper-Account)?\n\n"
             + "Eingelockt wird: " + label
             + (paramsTxt ? " (" + paramsTxt + ")" : "")
-            + " auf " + (this.tf === "1h" ? "Stundenkerzen (1h)" : "Tageskerzen (1d)") + ".\n"
-            + "Der Worker kauft/verkauft eigenständig nach diesem Signal, "
+            + " auf " + (this.tf === "1h" ? "Stundenkerzen (1h)" : "Tageskerzen (1d)")
+            + (riskTxt ? "\nRisk: " + riskTxt + " (als echte Order beim Broker)" : "\nRisk: kein Stop")
+            + ".\nDer Worker kauft/verkauft eigenständig nach diesem Signal, "
             + "bis Auto-Trade wieder ausgeschaltet wird.")) return;
         body.strategy = this.stratName;
         body.params = this.stratParams;
         body.timeframe = this.tf;
+        if (Object.keys(riskObj).length) body.risk = riskObj;
       }
       const resp = await fetch("/api/watchlist/" + encodeURIComponent(this.symbol), {
         method: "PATCH",
@@ -381,6 +414,8 @@ function detailState() {
       this.analysis.autotrade = target ? 1 : 0;
       this.analysis.strat_name = target ? this.stratName : null;
       this.analysis.strat_timeframe = target ? this.tf : null;
+      const lockedRisk = this.riskObject();
+      this.analysis.strat_risk = target && Object.keys(lockedRisk).length ? lockedRisk : null;
     },
 
     flagSummary() {

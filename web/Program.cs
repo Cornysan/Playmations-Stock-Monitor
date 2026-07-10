@@ -152,6 +152,31 @@ JsonElement? FindStrategySchema(JsonElement catalog, string name)
     return null;
 }
 
+// Risk-Overlay (Stop-Loss / Trailing-Stop) validieren → kanonisches JSON.
+// Spiegel der Regeln in worker/backtest.py parse_risk.
+(string? Canonical, string? Error) ValidateRisk(string? raw)
+{
+    if (string.IsNullOrWhiteSpace(raw)) return (null, null);
+    JsonElement el;
+    try { el = JsonSerializer.Deserialize<JsonElement>(raw); }
+    catch (JsonException) { return (null, "risk: kein gültiges JSON"); }
+    if (el.ValueKind != JsonValueKind.Object) return (null, "risk: JSON-Objekt erwartet");
+    var result = new SortedDictionary<string, double>();
+    foreach (var p in el.EnumerateObject())
+    {
+        if (p.Name is not ("stop_loss_pct" or "trail_pct"))
+            return (null, $"risk: unbekannter Key '{p.Name}'");
+        if (p.Value.ValueKind == JsonValueKind.Null) continue;
+        if (p.Value.ValueKind != JsonValueKind.Number)
+            return (null, "risk: nur numerische Werte erlaubt");
+        var v = p.Value.GetDouble();
+        if (v < 0.1 || v > 50)
+            return (null, "risk: Werte zwischen 0.1 und 50 (Prozent)");
+        result[p.Name] = v;
+    }
+    return (result.Count == 0 ? null : JsonSerializer.Serialize(result), null);
+}
+
 // Normalerweise legt der Worker das Schema an (inkl. Migration der alten
 // Ein-PK-Variante); falls das Web zuerst dran ist.
 void EnsureStrategyTable() => Execute(
@@ -382,7 +407,7 @@ app.MapGet("/api/symbols/{symbol}/analysis", (string symbol, string? tf) =>
 {
     var rows = Query("""
         SELECT a.*, w.name, w.holding, w.autotrade,
-               w.strat_name, w.strat_params, w.strat_timeframe FROM analysis a
+               w.strat_name, w.strat_params, w.strat_timeframe, w.strat_risk FROM analysis a
         LEFT JOIN watchlist w ON w.symbol = a.symbol
         WHERE a.symbol = @s AND a.timeframe = @tf ORDER BY a.as_of DESC LIMIT 1
         """, ("@s", symbol.ToUpperInvariant()), ("@tf", tf == "1h" ? "1h" : "1d"));
@@ -391,6 +416,7 @@ app.MapGet("/api/symbols/{symbol}/analysis", (string symbol, string? tf) =>
     row["flags"] = ParseJson(row["flags_json"]);
     row["indicators"] = ParseJson(row["indicators_json"]);
     row["strat_params"] = ParseJson(row["strat_params"]);
+    row["strat_risk"] = ParseJson(row["strat_risk"]);
     row.Remove("flags_json");
     row.Remove("indicators_json");
     return Results.Json(row);
@@ -511,10 +537,13 @@ app.MapPut("/api/strategies/{name}", async (string name, HttpRequest request) =>
     return Results.Json(new { name, timeframe, saved = paramsJson is not null, active = activeVal == 1 });
 });
 
-app.MapGet("/api/symbols/{symbol}/backtest", async (string symbol, string? strategy, string? @params, string? tf) =>
+app.MapGet("/api/symbols/{symbol}/backtest", async (string symbol, string? strategy, string? @params, string? tf, string? risk) =>
 {
     symbol = symbol.ToUpperInvariant();
     var timeframe = tf == "1h" ? "1h" : "1d";
+    var (riskCanonical, riskError) = ValidateRisk(risk);
+    if (riskError is not null)
+        return Results.BadRequest(new { error = riskError });
     var catalog = await StrategyCatalog();
     if (catalog is null)
         return Results.Json(new { error = "Backtest nicht verfügbar (PythonPath prüfen)" }, statusCode: 503);
@@ -541,13 +570,15 @@ app.MapGet("/api/symbols/{symbol}/backtest", async (string symbol, string? strat
         return Results.NotFound(new { error = "no bars for symbol" });
 
     var cache = app.Services.GetRequiredService<IMemoryCache>();
-    var key = $"bt:{symbol}:{strategy}:{canonical}:{timeframe}:{lastDate}";
+    var key = $"bt:{symbol}:{strategy}:{canonical}:{timeframe}:{riskCanonical}:{lastDate}";
     if (cache.TryGetValue(key, out string? cached) && cached is not null)
         return Results.Content(cached, "application/json");
 
-    var (code, stdout, stderr) = await RunPython("run", symbol,
+    var btArgs = new List<string> { "run", symbol,
         "--strategy", strategy, "--params", canonical, "--timeframe", timeframe,
-        "--db", dbPath);
+        "--db", dbPath };
+    if (riskCanonical is not null) { btArgs.Add("--risk"); btArgs.Add(riskCanonical); }
+    var (code, stdout, stderr) = await RunPython(btArgs.ToArray());
     if (code != 0)
     {
         app.Logger.LogError("Backtest {Symbol}/{Strategy} fehlgeschlagen ({Code}): {Err}",
@@ -639,18 +670,25 @@ app.MapPatch("/api/watchlist/{symbol}", async (string symbol, HttpRequest reques
             var validated = ValidateParams(schema, givenParams);
             if (validated is null)
                 return Results.BadRequest(new { error = "params: nur numerische Werte erlaubt" });
+            var (riskCanonical, riskError) = ValidateRisk(
+                body.TryGetProperty("risk", out var rEl) ? rEl.GetRawText() : null);
+            if (riskError is not null)
+                return Results.BadRequest(new { error = riskError });
             sets.Add("strat_name = @sn");
             args.Add(("@sn", stratName));
             sets.Add("strat_params = @sp");
             args.Add(("@sp", JsonSerializer.Serialize(validated)));
             sets.Add("strat_timeframe = @st");
             args.Add(("@st", lockTf));
+            sets.Add("strat_risk = @sr");
+            args.Add(("@sr", (object?)riskCanonical ?? DBNull.Value));
         }
         else
         {
             sets.Add("strat_name = NULL");
             sets.Add("strat_params = NULL");
             sets.Add("strat_timeframe = NULL");
+            sets.Add("strat_risk = NULL");
         }
     }
     if (sets.Count == 0)

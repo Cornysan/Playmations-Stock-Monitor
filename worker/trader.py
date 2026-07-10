@@ -25,6 +25,7 @@ restlichen Orders.
 from __future__ import annotations
 import datetime as dt
 import logging
+import time
 
 import broker
 import config
@@ -32,7 +33,9 @@ import db
 
 log = logging.getLogger("trader")
 
-MIN_NOTIONAL = 1.0  # Alpaca-Minimum für Notional-Orders
+MIN_NOTIONAL = 1.0   # Alpaca-Minimum für Notional-Orders
+FILL_POLL_TRIES = 5  # nach einem Buy mit Risk-Config: kurz auf den Fill warten,
+FILL_POLL_PAUSE = 3  # um die Schutz-Order sofort zu platzieren (sonst übernimmt sync)
 
 
 def enabled() -> bool:
@@ -93,10 +96,84 @@ def sync(con) -> None:
     log.info("broker sync: equity=%.2f cash=%.2f positions=%d",
              acct["equity"], acct["cash"], len(positions))
 
+    # 4. Schutz-Pass: jede Auto-Trade-Position mit Risk-Config im Lock braucht
+    #    eine offene Schutz-Order — heilt verpasste Fills, Neustarts und
+    #    Bruchstück-Reste nach gefeuerten Stops selbstständig.
+    risks = db.autotrade_risk(con)
+    today = dt.datetime.now(dt.timezone.utc)
+    key = today.strftime("%Y%m%dT%H%M")
+    for sym, risk in risks.items():
+        pos = positions.get(sym)
+        if pos is None or db.open_protection_order(con, sym) is not None:
+            continue
+        if _pdt_blocked(con, sym, today.strftime("%Y%m%d"), acct["equity"]):
+            log.warning("%s: Schutz-Order aufgeschoben (PDT-Schutz, Live < 25k)", sym)
+            continue
+        qty = int(pos["qty"])
+        if qty >= 1:
+            _place_protection(con, sym, qty, risk, pos["avg_entry_price"], key)
+        else:
+            # Bruchstück-Rest (z. B. Alt-Position nach gefeuertem Stop):
+            # nicht stop-fähig → glattstellen
+            cid = f"spm-{sym}-{key}-cleanup"
+            try:
+                o = broker.submit_market_sell(sym, pos["qty_raw"], cid)
+                db.upsert_order(con, _order_row(o, cid, sym, "sell"))
+                log.info("%s: Bruchstück-Rest (%s Stk.) glattgestellt", sym, pos["qty_raw"])
+            except broker.BrokerError as e:
+                log.error("%s: cleanup failed: %s", sym, e)
+
 
 # ---------------------------------------------------------------------------
 # Phase 2: trade (nach der Analyse)
 # ---------------------------------------------------------------------------
+
+def _place_protection(con, symbol: str, qty: int, risk: dict, entry_price: float,
+                      key: str) -> None:
+    """Schutz-Order beim Broker platzieren: Trailing-Stop wenn konfiguriert,
+    sonst fester Stop-Loss. GTC — greift intra-Kerze, unabhängig vom Worker."""
+    trail = risk.get("trail_pct")
+    stop = risk.get("stop_loss_pct")
+    try:
+        if trail:
+            cid = f"spm-{symbol}-{key}-trail"
+            o = broker.submit_trailing_stop(symbol, qty, float(trail), cid)
+            log.info("%s: trailing stop %.2f%% für %d Stk. platziert (%s)",
+                     symbol, float(trail), qty, o.get("status"))
+        elif stop:
+            cid = f"spm-{symbol}-{key}-stopl"
+            stop_price = entry_price * (1 - float(stop) / 100.0)
+            o = broker.submit_stop_sell(symbol, qty, stop_price, cid)
+            log.info("%s: stop-loss @ %.2f für %d Stk. platziert (%s)",
+                     symbol, stop_price, qty, o.get("status"))
+        else:
+            return
+        db.upsert_order(con, _order_row(o, cid, symbol, "sell"))
+    except broker.BrokerError as e:
+        log.error("%s: Schutz-Order fehlgeschlagen (sync versucht es erneut): %s",
+                  symbol, e)
+
+
+def _cancel_protection(con, symbol: str) -> None:
+    """Offene Schutz-Order stornieren (vor einem regulären Verkauf — die vom
+    Stop reservierten Stücke wären sonst nicht verkäuflich)."""
+    row = db.open_protection_order(con, symbol)
+    if row is None:
+        return
+    if row["alpaca_id"]:
+        try:
+            broker.cancel_order(row["alpaca_id"])
+        except broker.BrokerError as e:
+            log.warning("%s: cancel der Schutz-Order fehlgeschlagen: %s", symbol, e)
+            return
+    db.upsert_order(con, {**{k: row[k] for k in row.keys()
+                             if k in ("client_order_id", "alpaca_id", "symbol", "side",
+                                      "notional", "submitted_at", "filled_qty",
+                                      "filled_avg_price", "filled_at", "error")},
+                          "status": "canceled"})
+    time.sleep(1.5)  # Alpaca braucht einen Moment, bis die Stücke wieder frei sind
+    log.info("%s: Schutz-Order storniert (%s)", symbol, row["client_order_id"])
+
 
 def _pdt_blocked(con, symbol: str, day: str, equity: float) -> bool:
     """Pattern-Day-Trader-Schutz: Auf einem LIVE-Konto unter 25.000 USD Equity
@@ -128,6 +205,7 @@ def trade(con, as_of: str, timeframe: str = "1d") -> None:
         log.error("account is trading_blocked — skipping all orders")
         return
     positions = broker.get_positions()
+    risks = db.autotrade_risk(con)
     pot = acct["equity"] / len(all_symbols)
     cash = acct["cash"]
     day = as_of[:10].replace("-", "")
@@ -160,22 +238,64 @@ def trade(con, as_of: str, timeframe: str = "1d") -> None:
             if db.order_exists(con, cid):
                 log.info("%s: buy already submitted today (%s)", sym, cid)
                 continue
-            notional = round(min(pot, cash), 2)
-            if notional < max(MIN_NOTIONAL, 0.01 * pot):
+            budget = round(min(pot, cash), 2)
+            if budget < max(MIN_NOTIONAL, 0.01 * pot):
                 log.warning("%s: cash %.2f zu klein für Pott %.2f — skipped",
                             sym, cash, pot)
                 db.upsert_order(con, _order_row(
-                    None, cid, sym, "buy", notional,
+                    None, cid, sym, "buy", budget,
                     error=f"insufficient cash ({cash:.2f} for pot {pot:.2f})"))
                 continue
+            risk = risks.get(sym)
             try:
-                o = broker.submit_notional_buy(sym, notional, cid)
-                db.upsert_order(con, _order_row(o, cid, sym, "buy", notional))
-                cash -= notional
-                n_orders += 1
-                log.info("%s: BUY %.2f USD submitted (%s)", sym, notional, o.get("status"))
+                if risk:
+                    # Mit Risk-Config: ganze Stückzahlen kaufen — Alpaca
+                    # unterstützt Stop-/Trailing-Orders nicht auf Bruchstücke.
+                    last = db.last_close(con, sym, timeframe)
+                    if not last:
+                        log.warning("%s: kein Kurs für Stückzahl-Sizing — skipped", sym)
+                        continue
+                    qty = int(budget // last)
+                    if qty < 1:
+                        log.warning("%s: Pott %.2f reicht nicht für 1 Stück @ %.2f "
+                                    "— skipped", sym, budget, last)
+                        db.upsert_order(con, _order_row(
+                            None, cid, sym, "buy", budget,
+                            error=f"pot {budget:.2f} < 1 share @ {last:.2f}"))
+                        continue
+                    est = round(qty * last, 2)
+                    o = broker.submit_qty_buy(sym, qty, cid)
+                    db.upsert_order(con, _order_row(o, cid, sym, "buy", est))
+                    cash -= est
+                    n_orders += 1
+                    log.info("%s: BUY %d Stk. (~%.2f USD) submitted (%s)",
+                             sym, qty, est, o.get("status"))
+                    # Fill kurz pollen, damit die Schutz-Order sofort steht —
+                    # klappt es nicht rechtzeitig, übernimmt der nächste sync.
+                    if _pdt_blocked(con, sym, day, acct["equity"]):
+                        log.warning("%s: Schutz-Order heute übersprungen (PDT-Schutz, "
+                                    "Live-Konto < 25k) — sync platziert sie morgen", sym)
+                    else:
+                        for _ in range(FILL_POLL_TRIES):
+                            time.sleep(FILL_POLL_PAUSE)
+                            upd = broker.get_order_by_client_id(cid)
+                            if upd and upd.get("status") == "filled":
+                                db.upsert_order(con, _order_row(upd, cid, sym, "buy", est))
+                                entry = float(upd.get("filled_avg_price") or last)
+                                filled = int(float(upd.get("filled_qty") or qty))
+                                _place_protection(con, sym, filled, risk, entry, run_key)
+                                break
+                        else:
+                            log.info("%s: Fill noch offen — Schutz-Order kommt beim "
+                                     "nächsten sync", sym)
+                else:
+                    o = broker.submit_notional_buy(sym, budget, cid)
+                    db.upsert_order(con, _order_row(o, cid, sym, "buy", budget))
+                    cash -= budget
+                    n_orders += 1
+                    log.info("%s: BUY %.2f USD submitted (%s)", sym, budget, o.get("status"))
             except broker.BrokerError as e:
-                db.upsert_order(con, _order_row(None, cid, sym, "buy", notional,
+                db.upsert_order(con, _order_row(None, cid, sym, "buy", budget,
                                                 error=str(e)))
                 log.error("%s: buy failed: %s", sym, e)
 
@@ -188,6 +308,8 @@ def trade(con, as_of: str, timeframe: str = "1d") -> None:
                 log.warning("%s: sell skipped — Same-Day-Roundtrip auf Live-Konto "
                             "< 25k USD (Pattern-Day-Trader-Schutz)", sym)
                 continue
+            # Offene Schutz-Order zuerst stornieren — sie hält die Stücke
+            _cancel_protection(con, sym)
             qty = positions[sym]["qty_raw"]
             try:
                 o = broker.submit_market_sell(sym, qty, cid)

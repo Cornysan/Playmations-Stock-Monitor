@@ -32,31 +32,42 @@ import strategies
 WARMUP = 60  # gleiche Mindesthistorie wie main.analyze_symbols
 
 
-def load_bars(db_path, symbol: str,
-              timeframe: str = "1d") -> tuple[list[str], list, list[float]]:
-    """dates sind ISO-Tage (1d) bzw. ISO-UTC-Datetimes (1h) — beides sortiert
-    lexikographisch korrekt."""
-    sql = ("SELECT ts, open, close FROM bars_1h WHERE symbol=? AND close IS NOT NULL "
-           "ORDER BY ts") if timeframe == "1h" else \
-          ("SELECT date, open, close FROM bars WHERE symbol=? AND close IS NOT NULL "
-           "ORDER BY date")
+def load_bars(db_path, symbol: str, timeframe: str = "1d"):
+    """(dates, opens, highs, lows, closes) — dates sind ISO-Tage (1d) bzw.
+    ISO-UTC-Datetimes (1h), beides sortiert lexikographisch korrekt."""
+    sql = ("SELECT ts, open, high, low, close FROM bars_1h "
+           "WHERE symbol=? AND close IS NOT NULL ORDER BY ts") if timeframe == "1h" else \
+          ("SELECT date, open, high, low, close FROM bars "
+           "WHERE symbol=? AND close IS NOT NULL ORDER BY date")
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     try:
         rows = con.execute(sql, (symbol,)).fetchall()
     finally:
         con.close()
-    return [r[0] for r in rows], [r[1] for r in rows], [r[2] for r in rows]
+    return ([r[0] for r in rows], [r[1] for r in rows], [r[2] for r in rows],
+            [r[3] for r in rows], [r[4] for r in rows])
 
 
-def run_backtest(dates: list[str], opens: list, closes: list[float], strat,
-                 params: dict, execution: str = "next_open") -> dict:
+def run_backtest(dates: list[str], opens: list, highs: list, lows: list,
+                 closes: list[float], strat, params: dict,
+                 execution: str = "next_open", risk: dict | None = None) -> dict:
     n = len(closes)
     signals: list[dict] = []
     trades: list[dict] = []
     equity: list[dict] = []
 
+    # Risk-Overlay (unabhängig von der Signal-Strategie): fester Stop unterm
+    # Einstieg und/oder Trailing-Stop unterm Hoch seit Einstieg. Simulation
+    # intra-Kerze gegen Open/Low; das Level stammt immer aus dem Stand VOR der
+    # aktuellen Kerze (kein Blick in die laufende Kerze beim Nachziehen).
+    risk = risk or {}
+    stop_pct = risk.get("stop_loss_pct")
+    trail_pct = risk.get("trail_pct")
+    has_risk = bool(stop_pct or trail_pct)
+
     in_pos = False
     entry_date, entry_price, entry_idx = None, None, None
+    pos_peak = None          # Hoch seit Einstieg (Basis des Trailing-Stops)
     eq, peak, max_dd = 1.0, 1.0, 0.0
     bars_in_market = 0
     pending = None  # next_open: gestriges Signal, wird an der heutigen Eröffnung gefüllt
@@ -64,60 +75,100 @@ def run_backtest(dates: list[str], opens: list, closes: list[float], strat,
     def open_or_close(i: int) -> float:
         return opens[i] if opens[i] is not None else closes[i]
 
+    def stop_level() -> tuple[float, str] | None:
+        """(Level, Grund) des aktuell schärfsten Stops, oder None."""
+        if not in_pos or not has_risk:
+            return None
+        best = None
+        if stop_pct:
+            best = (entry_price * (1 - stop_pct / 100.0), "stop")
+        if trail_pct:
+            t = (pos_peak * (1 - trail_pct / 100.0), "trail")
+            if best is None or t[0] > best[0]:
+                best = t
+        return best
+
+    def close_trade(i: int, px: float, reason: str) -> None:
+        nonlocal in_pos, pos_peak
+        in_pos = False
+        pos_peak = None
+        trades.append({
+            "entry_date": entry_date, "entry_price": entry_price,
+            "exit_date": dates[i], "exit_price": px,
+            "pnl_pct": round((px / entry_price - 1) * 100, 2),
+            "bars_held": i - entry_idx,
+            "open": False,
+            "exit_reason": reason,
+        })
+        sig = {"date": dates[i], "type": "sell", "price": px}
+        if reason != "signal":
+            sig["reason"] = reason
+        signals.append(sig)
+
     for i in range(WARMUP, n):
         entered_at_open = False
+        ref_close = closes[i - 1]  # Equity-Referenz für Positionen aus der Vor-Kerze
 
         # 1. next_open: gestriges Signal zur heutigen Eröffnung ausführen
         if pending == "buy" and not in_pos:
             px = open_or_close(i)
             in_pos, entered_at_open = True, True
             entry_date, entry_price, entry_idx = dates[i], px, i
+            pos_peak = px
             signals.append({"date": dates[i], "type": "buy", "price": px})
         elif pending == "sell" and in_pos:
             px = open_or_close(i)
-            eq *= px / closes[i - 1]
-            in_pos = False
-            trades.append({
-                "entry_date": entry_date, "entry_price": entry_price,
-                "exit_date": dates[i], "exit_price": px,
-                "pnl_pct": round((px / entry_price - 1) * 100, 2),
-                "bars_held": i - entry_idx,
-                "open": False,
-            })
-            signals.append({"date": dates[i], "type": "sell", "price": px})
+            eq *= px / ref_close
+            close_trade(i, px, "signal")
         pending = None
 
-        # 2. Equity über den heutigen Bar fortschreiben
-        if entered_at_open:
-            eq *= closes[i] / entry_price
-            bars_in_market += 1
-        elif in_pos:
-            eq *= closes[i] / closes[i - 1]
-            bars_in_market += 1
+        # 2. Stop-Check intra-Kerze: Gap unter dem Level → Fill zur Eröffnung,
+        #    sonst Low unter dem Level → Fill am Level.
+        stopped_px = None
+        if in_pos and has_risk and (lvl := stop_level()) is not None:
+            level, reason = lvl
+            o = open_or_close(i)
+            low = lows[i] if lows[i] is not None else closes[i]
+            if not entered_at_open and o <= level:
+                stopped_px = o        # Gap: Eröffnung liegt schon unterm Level
+            elif low <= level:
+                stopped_px = level
+            if stopped_px is not None:
+                eq *= stopped_px / (entry_price if entered_at_open else ref_close)
+                bars_in_market += 1
+                close_trade(i, round(stopped_px, 4), reason)
 
-        # 3. Entscheidung auf dem heutigen Close
+        # 3. Equity über den heutigen Bar fortschreiben
+        if stopped_px is None:
+            if entered_at_open:
+                eq *= closes[i] / entry_price
+                bars_in_market += 1
+            elif in_pos:
+                eq *= closes[i] / ref_close
+                bars_in_market += 1
+
+        # 4. Entscheidung auf dem heutigen Close
         card = strategies.run(strat, closes[: i + 1], holding=in_pos, params=params)
         sig = card["signal"]
 
-        # 4. Ausführung: sofort (close) oder morgen früh (next_open)
+        # 5. Ausführung: sofort (close) oder morgen früh (next_open)
         if execution == "close":
             if sig == "BUY" and not in_pos:
                 in_pos = True
                 entry_date, entry_price, entry_idx = dates[i], closes[i], i
+                pos_peak = closes[i]
                 signals.append({"date": dates[i], "type": "buy", "price": closes[i]})
             elif sig == "SELL" and in_pos:
-                in_pos = False
-                trades.append({
-                    "entry_date": entry_date, "entry_price": entry_price,
-                    "exit_date": dates[i], "exit_price": closes[i],
-                    "pnl_pct": round((closes[i] / entry_price - 1) * 100, 2),
-                    "bars_held": i - entry_idx,
-                    "open": False,
-                })
-                signals.append({"date": dates[i], "type": "sell", "price": closes[i]})
+                # Equity ist in Schritt 3 bereits bis zum Close fortgeschrieben
+                close_trade(i, closes[i], "signal")
         else:
             if (sig == "BUY" and not in_pos) or (sig == "SELL" and in_pos):
                 pending = sig.lower()
+
+        # 6. Trailing-Basis erst NACH allen Checks mit dem heutigen Hoch nachziehen
+        if in_pos and trail_pct:
+            high = highs[i] if highs[i] is not None else closes[i]
+            pos_peak = max(pos_peak, high)
 
         peak = max(peak, eq)
         max_dd = max(max_dd, 1.0 - eq / peak)
@@ -135,6 +186,7 @@ def run_backtest(dates: list[str], opens: list, closes: list[float], strat,
             "pnl_pct": round((closes[-1] / entry_price - 1) * 100, 2),
             "bars_held": n - 1 - entry_idx,
             "open": True,
+            "exit_reason": None,
         })
 
     closed = [t for t in trades if not t["open"]]
@@ -157,8 +209,32 @@ def run_backtest(dates: list[str], opens: list, closes: list[float], strat,
         "profit_factor": round(gross_win / gross_loss, 2) if gross_loss > 0 else None,
         "max_drawdown_pct": pct(max_dd * 100),
         "exposure_pct": pct(bars_in_market / (n - WARMUP) * 100) if n > WARMUP else None,
+        "n_stop_exits": len([t for t in closed
+                             if t.get("exit_reason") in ("stop", "trail")]),
     }
     return {"signals": signals, "trades": trades, "stats": stats, "equity": equity}
+
+
+def parse_risk(raw: str | None) -> dict:
+    """Risk-Overlay validieren: nur stop_loss_pct / trail_pct, je 0.1–50 %.
+    Ungültige Angaben lösen ValueError aus (Fehler statt stiller Ignoranz)."""
+    if not raw:
+        return {}
+    risk = json.loads(raw)
+    if not isinstance(risk, dict):
+        raise ValueError("risk must be a JSON object")
+    out = {}
+    for key in ("stop_loss_pct", "trail_pct"):
+        v = risk.get(key)
+        if v is None:
+            continue
+        if not isinstance(v, (int, float)) or not 0.1 <= float(v) <= 50:
+            raise ValueError(f"{key} must be a number between 0.1 and 50")
+        out[key] = float(v)
+    unknown = set(risk) - {"stop_loss_pct", "trail_pct"}
+    if unknown:
+        raise ValueError(f"unknown risk keys: {sorted(unknown)}")
+    return out
 
 
 def cmd_run(args) -> int:
@@ -173,16 +249,23 @@ def cmd_run(args) -> int:
     except ValueError as e:
         print(json.dumps({"error": f"ungültige Params: {e}"}))
         return 1
+    try:
+        risk = parse_risk(args.risk)
+    except ValueError as e:
+        print(json.dumps({"error": f"ungültiges Risk-Overlay: {e}"}))
+        return 1
 
     symbol = args.symbol.upper()
-    dates, opens, closes = load_bars(args.db or config.DB_PATH, symbol, args.timeframe)
+    dates, opens, highs, lows, closes = load_bars(
+        args.db or config.DB_PATH, symbol, args.timeframe)
     if len(closes) <= WARMUP:
         print(json.dumps({"error": f"zu wenig Bars für {symbol} "
                                    f"({len(closes)}, benötigt >{WARMUP})"}))
         return 1
 
     resolved = strategies.resolve_params(strat, params)
-    result = run_backtest(dates, opens, closes, strat, resolved, args.execution)
+    result = run_backtest(dates, opens, highs, lows, closes, strat, resolved,
+                          args.execution, risk)
     result["meta"] = {
         "symbol": symbol,
         "strategy": strat.NAME,
@@ -192,6 +275,7 @@ def cmd_run(args) -> int:
         "n_bars": len(closes),
         "execution": args.execution,
         "timeframe": args.timeframe,
+        "risk": risk or None,
         "macro": None,
     }
     print(json.dumps(result, ensure_ascii=False))
@@ -210,6 +294,8 @@ def main() -> int:
                        default="next_open")
     run_p.add_argument("--timeframe", choices=["1d", "1h"], default="1d",
                        help="1h testet auf Stundenkerzen (Tabelle bars_1h)")
+    run_p.add_argument("--risk", help='Risk-Overlay, z. B. {"trail_pct": 3} — '
+                                      "Stops werden intra-Kerze gegen Open/Low simuliert")
     run_p.add_argument("--db", help="Pfad zur SQLite-DB (Default: config.DB_PATH)")
     args = ap.parse_args()
 

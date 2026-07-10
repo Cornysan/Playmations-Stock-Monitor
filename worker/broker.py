@@ -112,6 +112,58 @@ def submit_market_sell(symbol: str, qty: str, client_order_id: str) -> dict:
     })
 
 
+def submit_qty_buy(symbol: str, qty: int, client_order_id: str) -> dict:
+    """Market-Buy ganzer Stückzahlen. Für Positionen mit Stop-Schutz Pflicht:
+    Alpaca erlaubt Stop-/Trailing-Orders nur auf ganze Aktien."""
+    return _request("POST", "/v2/orders", payload={
+        "symbol": symbol,
+        "qty": str(int(qty)),
+        "side": "buy",
+        "type": "market",
+        "time_in_force": "day",
+        "client_order_id": client_order_id,
+    })
+
+
+def submit_trailing_stop(symbol: str, qty: int, trail_percent: float,
+                         client_order_id: str) -> dict:
+    """Trailing-Stop-Sell (GTC): Alpaca zieht das Stop-Level am Hoch nach und
+    verkauft intra-Kerze — unabhängig von den Worker-Läufen."""
+    return _request("POST", "/v2/orders", payload={
+        "symbol": symbol,
+        "qty": str(int(qty)),
+        "side": "sell",
+        "type": "trailing_stop",
+        "trail_percent": str(round(trail_percent, 2)),
+        "time_in_force": "gtc",
+        "client_order_id": client_order_id,
+    })
+
+
+def submit_stop_sell(symbol: str, qty: int, stop_price: float,
+                     client_order_id: str) -> dict:
+    """Fester Stop-Loss-Sell (GTC) zu einem absoluten Stop-Preis."""
+    return _request("POST", "/v2/orders", payload={
+        "symbol": symbol,
+        "qty": str(int(qty)),
+        "side": "sell",
+        "type": "stop",
+        "stop_price": str(round(stop_price, 2)),
+        "time_in_force": "gtc",
+        "client_order_id": client_order_id,
+    })
+
+
+def cancel_order(order_id: str) -> None:
+    """Order stornieren; bereits gefüllte/stornierte Orders sind kein Fehler."""
+    try:
+        _request("DELETE", f"/v2/orders/{order_id}")
+    except BrokerError as e:
+        if "404" in str(e) or "422" in str(e):
+            return
+        raise
+
+
 def get_order_by_client_id(client_order_id: str) -> dict | None:
     try:
         return _request("GET", "/v2/orders:by_client_order_id",
