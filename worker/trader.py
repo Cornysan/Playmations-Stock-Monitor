@@ -12,9 +12,10 @@ Ablauf pro Tagesrun (main.run_once):
   trade(con, as_of)  NACH der Analyse: BUY im Flat → Notional-Kauf (Pott),
                      SELL in Position → Market-Sell der ganzen Position.
 
-TRADING_TIMEFRAME steuert, welche Läufe handeln: "1d" → der Tagesrun auf
-Tagessignalen (Default), "1h" → die Stunden-Läufe auf 1h-Signalen (trade()
-bekommt dann timeframe="1h" und stündliche Idempotenz-Fenster).
+Jedes Auto-Trade-Symbol handelt in seinem eingelockten Timeframe (watchlist.
+strat_timeframe, beim Aktivieren im UI eingefroren); Symbole ohne Lock fallen
+auf TRADING_TIMEFRAME zurück. Tagesrun → trade(timeframe="1d"), Stunden-Läufe
+→ trade(timeframe="1h") mit stündlichen Idempotenz-Fenstern.
 
 Sicherungen: TRADING_ENABLED-Opt-in, client_order_id-Idempotenz (pro Symbol,
 Run-Fenster und Seite), MAX_ORDERS_PER_RUN-Circuit-Breaker, PDT-Schutz auf
@@ -112,9 +113,14 @@ def _pdt_blocked(con, symbol: str, day: str, equity: float) -> bool:
     return row is not None
 
 def trade(con, as_of: str, timeframe: str = "1d") -> None:
-    symbols = db.autotrade_symbols(con)
+    # Pott = Equity / ALLE Auto-Trade-Symbole (über beide Timeframes hinweg),
+    # gehandelt werden in diesem Run nur die mit passendem effektivem Timeframe
+    # (Lock am Symbol, ohne Lock der TRADING_TIMEFRAME-Fallback).
+    all_symbols = db.autotrade_symbols(con)
+    symbols = db.autotrade_symbols(con, timeframe=timeframe,
+                                   fallback_tf=config.TRADING_TIMEFRAME)
     if not symbols:
-        log.info("no autotrade symbols — nothing to do")
+        log.info("no autotrade symbols for timeframe %s — nothing to do", timeframe)
         return
 
     acct = broker.get_account()
@@ -122,7 +128,7 @@ def trade(con, as_of: str, timeframe: str = "1d") -> None:
         log.error("account is trading_blocked — skipping all orders")
         return
     positions = broker.get_positions()
-    pot = acct["equity"] / len(symbols)
+    pot = acct["equity"] / len(all_symbols)
     cash = acct["cash"]
     day = as_of[:10].replace("-", "")
     # 1h-Läufe handeln mehrmals täglich → Idempotenz-Fenster ist der Run
@@ -130,7 +136,7 @@ def trade(con, as_of: str, timeframe: str = "1d") -> None:
     # Vormittags-Verkauf für den Rest des Tages blockiert.
     run_key = day if timeframe == "1d" else f"{day}T{as_of[11:13]}"
     log.info("trade[%s]: %d symbols, pot=%.2f (equity %.2f / %d), cash=%.2f",
-             timeframe, len(symbols), pot, acct["equity"], len(symbols), cash)
+             timeframe, len(symbols), pot, acct["equity"], len(all_symbols), cash)
 
     placeholders = ",".join("?" * len(symbols))
     signals = {r["symbol"]: r["signal"] for r in con.execute(

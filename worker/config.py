@@ -52,7 +52,7 @@ ALPACA_SECRET_KEY = os.environ.get("ALPACA_SECRET_KEY", "")
 ALPACA_BASE_URL = os.environ.get("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
 TRADING_ENABLED = os.environ.get("TRADING_ENABLED", "0") == "1"
 MAX_ORDERS_PER_RUN = int(os.environ.get("MAX_ORDERS_PER_RUN", "20"))
-# Welche Signale handeln: "1d" (täglicher Lauf, Default) oder "1h" (Stunden-Läufe
-# während der US-Handelszeiten). Bewusst explizit — Umschalten ändert die
-# Trading-Frequenz fundamental.
+# Fallback-Timeframe für Auto-Trade-Symbole OHNE eingelockte Strategie
+# (watchlist.strat_timeframe). Neue Locks kommen aus dem UI; dieses Flag
+# betrifft nur Alt-Symbole, die vor dem Lock-Feature aktiviert wurden.
 TRADING_TIMEFRAME = os.environ.get("TRADING_TIMEFRAME", "1d")

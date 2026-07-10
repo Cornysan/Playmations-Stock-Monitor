@@ -14,6 +14,7 @@ Commands:
 from __future__ import annotations
 import argparse
 import datetime as dt
+import json
 import logging
 import sys
 import time
@@ -126,15 +127,38 @@ def run_macro(con, as_of: str) -> int | None:
     return result.pillar_score
 
 
-def active_strategy(con):
-    """Aktive Strategie + Params aus strategy_config; Fallback auf den Default."""
-    name, params = db.active_strategy(con) or (strategies.DEFAULT, {})
+def active_strategy(con, timeframe: str = "1d"):
+    """Für den Timeframe aktive Strategie + Params; Fallback auf den Default."""
+    name, params = db.active_strategy(con, timeframe) or (strategies.DEFAULT, {})
     strat = strategies.get(name)
     if strat is None:
         log.error("active strategy %r not found — falling back to %s",
                   name, strategies.DEFAULT)
         strat, params = strategies.get(strategies.DEFAULT), {}
     return strat, params
+
+
+def _locked_strategy(row, timeframe: str):
+    """Eingelockte Strategie eines Auto-Trade-Symbols, wenn sie für diesen
+    Timeframe gilt — sonst None (→ globale aktive Strategie)."""
+    try:
+        if not row["autotrade"] or not row["strat_name"]:
+            return None
+        locked_tf = row["strat_timeframe"] or config.TRADING_TIMEFRAME
+    except (KeyError, IndexError):
+        return None
+    if locked_tf != timeframe:
+        return None
+    strat = strategies.get(row["strat_name"])
+    if strat is None:
+        log.error("%s: locked strategy %r not found — using active strategy",
+                  row["symbol"], row["strat_name"])
+        return None
+    try:
+        params = json.loads(row["strat_params"]) if row["strat_params"] else {}
+    except ValueError:
+        params = {}
+    return strat, (params if isinstance(params, dict) else {})
 
 
 def analyze_symbols(con, rows, macro_score: int | None, as_of: str,
@@ -144,14 +168,19 @@ def analyze_symbols(con, rows, macro_score: int | None, as_of: str,
         update_bars_1h(con, symbols)
     else:
         update_bars(con, symbols)
-    strat, params = active_strategy(con)
-    log.info("strategy: %s params=%s", strat.NAME, strategies.resolve_params(strat, params))
+    default_strat, default_params = active_strategy(con, timeframe)
+    log.info("strategy[%s]: %s params=%s", timeframe, default_strat.NAME,
+             strategies.resolve_params(default_strat, default_params))
     for row in rows:
         sym = row["symbol"]
         closes = db.closes_1h(con, sym) if timeframe == "1h" else db.closes(con, sym)
         if len(closes) < 60:
             log.warning("%s: only %d bars — skipping analysis", sym, len(closes))
             continue
+        # Auto-Trade-Symbole mit Lock werden mit IHRER Strategie analysiert —
+        # das Signal, das der Trader liest, kommt genau aus der Konfiguration,
+        # die beim Aktivieren eingefroren wurde.
+        strat, params = _locked_strategy(row, timeframe) or (default_strat, default_params)
         card = strategies.run(
             strat, closes,
             holding=bool(row["holding"]),
@@ -159,7 +188,8 @@ def analyze_symbols(con, rows, macro_score: int | None, as_of: str,
             macro_score=macro_score,
         )
         db.write_analysis(con, sym, as_of, card, strat.NAME, timeframe)
-        log.info("%s: %-28s signal=%s", sym, card["action"], card["signal"])
+        log.info("%s: %-28s signal=%s%s", sym, card["action"], card["signal"],
+                 " [locked]" if strat is not default_strat else "")
 
 
 def run_once(con, only: list[str] | None = None) -> None:
@@ -189,10 +219,11 @@ def run_once(con, only: list[str] | None = None) -> None:
         log.info("analyzing %d symbols", len(rows))
         analyze_symbols(con, rows, macro_score, as_of)
 
-        # Bei TRADING_TIMEFRAME=1h handeln ausschließlich die Stunden-Läufe.
-        if trading and config.TRADING_TIMEFRAME == "1d":
+        # trade() handelt nur Symbole, deren effektiver Timeframe (Lock,
+        # sonst TRADING_TIMEFRAME) zum Run passt.
+        if trading:
             try:
-                trader.trade(con, as_of)
+                trader.trade(con, as_of, timeframe="1d")
             except Exception as e:
                 log.error("trading failed (analysis is unaffected): %s", e)
 
@@ -213,7 +244,7 @@ def run_hourly(con, only: list[str] | None = None) -> None:
     as_of = now_iso()
     log.info("=== hourly run %s ===", as_of)
 
-    trading = trader.enabled() and config.TRADING_TIMEFRAME == "1h"
+    trading = trader.enabled()
     if trading:
         try:
             trader.sync(con)
@@ -253,7 +284,8 @@ def catch_up(con) -> None:
     # retried every 15 minutes forever (the daily run still retries them once a day).
     cutoff = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=48)).isoformat(timespec="seconds")
     rows = con.execute(
-        """SELECT symbol, name, holding FROM watchlist w
+        """SELECT symbol, name, holding, autotrade, strat_name, strat_params,
+                  strat_timeframe FROM watchlist w
            WHERE enabled = 1 AND added_at >= ? AND NOT EXISTS
              (SELECT 1 FROM analysis a WHERE a.symbol = w.symbol)""",
         (cutoff,),

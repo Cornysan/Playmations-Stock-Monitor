@@ -58,12 +58,15 @@ CREATE TABLE IF NOT EXISTS meta (
   value TEXT
 );
 
--- Strategie-Auswahl + Parameter-Overrides. Neben watchlist die einzige
--- Tabelle, die auch das Web beschreibt (UI: Params speichern / aktiv setzen).
+-- Strategie-Auswahl + Parameter-Overrides, getrennt pro Timeframe (1d/1h) —
+-- EMA-Perioden bedeuten auf Stundenkerzen etwas anderes als auf Tageskerzen.
+-- Neben watchlist die einzige Tabelle, die auch das Web beschreibt.
 CREATE TABLE IF NOT EXISTS strategy_config (
-  name        TEXT PRIMARY KEY,
+  name        TEXT NOT NULL,
+  timeframe   TEXT NOT NULL DEFAULT '1d',
   params_json TEXT,
-  active      INTEGER NOT NULL DEFAULT 0
+  active      INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (name, timeframe)
 );
 
 -- Auto-Trading: jede an Alpaca geschickte Order (auch fehlgeschlagene).
@@ -117,6 +120,26 @@ def _migrate(con: sqlite3.Connection) -> None:
     wcols = {r["name"] for r in con.execute("PRAGMA table_info(watchlist)")}
     if "autotrade" not in wcols:
         con.execute("ALTER TABLE watchlist ADD COLUMN autotrade INTEGER NOT NULL DEFAULT 0")
+    # Auto-Trade-Lock: beim Aktivieren eingefrorene Strategie (+Params, +Timeframe).
+    # NULL = kein Lock → globale aktive Strategie / TRADING_TIMEFRAME-Fallback.
+    if "strat_name" not in wcols:
+        con.execute("ALTER TABLE watchlist ADD COLUMN strat_name TEXT")
+        con.execute("ALTER TABLE watchlist ADD COLUMN strat_params TEXT")
+        con.execute("ALTER TABLE watchlist ADD COLUMN strat_timeframe TEXT")
+    # strategy_config: alte Ein-Spalten-PK-Tabelle (nur name) auf (name, timeframe)
+    # umbauen; Bestandszeilen waren faktisch Tages-Konfiguration.
+    scols = {r["name"] for r in con.execute("PRAGMA table_info(strategy_config)")}
+    if scols and "timeframe" not in scols:
+        con.execute("ALTER TABLE strategy_config RENAME TO strategy_config_old")
+        con.execute(
+            "CREATE TABLE strategy_config ("
+            "name TEXT NOT NULL, timeframe TEXT NOT NULL DEFAULT '1d', "
+            "params_json TEXT, active INTEGER NOT NULL DEFAULT 0, "
+            "PRIMARY KEY (name, timeframe))")
+        con.execute(
+            "INSERT INTO strategy_config(name, timeframe, params_json, active) "
+            "SELECT name, '1d', params_json, active FROM strategy_config_old")
+        con.execute("DROP TABLE strategy_config_old")
     con.commit()
 
 
@@ -124,7 +147,8 @@ def _migrate(con: sqlite3.Connection) -> None:
 
 def active_symbols(con: sqlite3.Connection) -> list[sqlite3.Row]:
     return con.execute(
-        "SELECT symbol, name, holding FROM watchlist WHERE enabled=1 ORDER BY symbol"
+        "SELECT symbol, name, holding, autotrade, strat_name, strat_params, "
+        "strat_timeframe FROM watchlist WHERE enabled=1 ORDER BY symbol"
     ).fetchall()
 
 
@@ -214,10 +238,12 @@ def write_analysis(con: sqlite3.Connection, symbol: str, as_of: str,
     con.commit()
 
 
-def active_strategy(con: sqlite3.Connection) -> tuple[str, dict] | None:
-    """(name, params) der aktiven Strategie, oder None (→ Default)."""
+def active_strategy(con: sqlite3.Connection,
+                    timeframe: str = "1d") -> tuple[str, dict] | None:
+    """(name, params) der für den Timeframe aktiven Strategie, oder None (→ Default)."""
     row = con.execute(
-        "SELECT name, params_json FROM strategy_config WHERE active=1 LIMIT 1"
+        "SELECT name, params_json FROM strategy_config WHERE active=1 AND timeframe=? "
+        "LIMIT 1", (timeframe,)
     ).fetchone()
     if row is None:
         return None
@@ -242,9 +268,18 @@ def write_macro(con: sqlite3.Connection, as_of: str, result) -> None:
 
 # --- auto-trading ------------------------------------------------------------
 
-def autotrade_symbols(con: sqlite3.Connection) -> list[str]:
+def autotrade_symbols(con: sqlite3.Connection, timeframe: str | None = None,
+                      fallback_tf: str = "1d") -> list[str]:
+    """Auto-Trade-Symbole; mit `timeframe` nur die, deren effektiver Timeframe
+    (Lock, sonst `fallback_tf`) passt."""
+    if timeframe is None:
+        return [r["symbol"] for r in con.execute(
+            "SELECT symbol FROM watchlist WHERE enabled=1 AND autotrade=1 "
+            "ORDER BY symbol")]
     return [r["symbol"] for r in con.execute(
-        "SELECT symbol FROM watchlist WHERE enabled=1 AND autotrade=1 ORDER BY symbol")]
+        "SELECT symbol FROM watchlist WHERE enabled=1 AND autotrade=1 "
+        "AND COALESCE(strat_timeframe, ?) = ? ORDER BY symbol",
+        (fallback_tf, timeframe))]
 
 
 def upsert_order(con: sqlite3.Connection, o: dict) -> None:

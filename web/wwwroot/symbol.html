@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Symbol · stocks.playmations.com</title>
-  <link rel="stylesheet" href="/css/app.css?v=6">
-  <script src="/js/app.js?v=6"></script>
+  <link rel="stylesheet" href="/css/app.css?v=7">
+  <script src="/js/app.js?v=7"></script>
   <script src="/js/lightweight-charts.standalone.production.js"></script>
   <script defer src="/js/alpine.min.js"></script>
   <script>
@@ -43,8 +43,8 @@
             title="Umschalten: bin ich hier investiert?"></button>
     <span x-text="analysis?.holding ? 'Im Depot (Holder-Framing)' : 'Nicht im Depot (Entry-Framing)'"></span>
     <button class="toggle auto" x-show="admin" :class="{ on: analysis?.autotrade }" @click="toggleAutotrade()"
-            title="Auto-Trade: Worker kauft/verkauft dieses Symbol automatisch nach Signal (Paper-Account)"></button>
-    <span x-show="admin" x-text="analysis?.autotrade ? 'Auto-Trade an' : 'Auto-Trade aus'"></span>
+            title="Auto-Trade: lockt die aktuell gewählte Strategie (+Params +Timeframe) ein — der Worker handelt dieses Symbol dann automatisch danach"></button>
+    <span x-show="admin" x-text="autotradeLabel()"></span>
     <span class="stale" x-show="analysis"
           x-text="'· Analyse vom ' + fmtAsOf(analysis?.as_of) + (analysis?.strategy ? ' · ' + analysis.strategy : '')
                 + (analysis?.timeframe === '1h' ? ' · 1h-Signal' : '')"></span>
@@ -83,7 +83,7 @@
               title="Parameter als Standard für diese Strategie speichern">Speichern</button>
       <button class="mini-btn accent" x-cloak x-show="admin && !currentStrategy()?.active"
               @click="saveStrategy(true)"
-              title="Diese Strategie (mit diesen Parametern) für den täglichen Lauf aktivieren">Aktiv setzen</button>
+              :title="'Diese Strategie (mit diesen Parametern) als Standard für alle ' + (tf === '1h' ? '1h' : '1d') + '-Analysen aktivieren'">Aktiv setzen</button>
     </div>
     <div class="chart-toolbar">
       <button class="range-btn" :class="{ active: tf === '1d' }" @click="setTf('1d')"

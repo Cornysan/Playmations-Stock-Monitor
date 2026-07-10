@@ -9,8 +9,11 @@ Selbstgehostetes Stock-Analyse-Dashboard. Voller Kontext: `docs/PROJEKTPLAN.md`.
   (deterministisch, stdlib-only — Numerik niemals in C#/JS nachbauen) und schreibt
   nach `data/stocks.db` (SQLite, WAL). Einziger Schreiber für Analyse-Tabellen.
   Signale kommen aus austauschbaren Plugins in `worker/strategies/` (Kontrakt:
-  dortiges `__init__.py`; Default `three_pillars` wrappt score.py). Die via
-  `strategy_config`-Tabelle aktive Strategie steuert alle Runs.
+  dortiges `__init__.py`; Default `three_pillars` wrappt score.py). Die in
+  `strategy_config` (PK name+timeframe) je Timeframe aktive Strategie steuert
+  die Analyse; Auto-Trade-Symbole mit Lock (watchlist.strat_name/-params/
+  -timeframe, beim Aktivieren im UI eingefroren) werden stattdessen mit ihrer
+  eingelockten Strategie analysiert und gehandelt.
   Zwei Timeframes: Tagesrun nach US-Close (Macro + `bars` + Analyse `1d`) und
   Stunden-Läufe Mo–Fr 10:35–16:35 ET (`bars_1h` + Analyse `1h`, nur fertige
   Kerzen, Macro aus letztem Snapshot). `analysis.timeframe` trennt beide.

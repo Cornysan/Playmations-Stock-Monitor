@@ -82,7 +82,8 @@ function detailState() {
     series: null,
     markersApi: null,
     firstBarTime: null,
-    strategies: null,     // [{name,label,description,params,saved_params,active}]
+    strategies: null,     // [{name,label,description,params,saved_params,active}] (pro tf)
+    strategiesTf: null,   // Timeframe, für den `strategies` geladen wurde
     stratName: null,
     stratParams: {},
     backtest: null,
@@ -117,7 +118,8 @@ function detailState() {
       this.backtest = null;
       this.backtestError = null;
       this.applyMarkers();
-      await Promise.all([this.loadAnalysis(), this.loadChart()]);
+      // Strategien neu laden: gespeicherte Params + "aktiv" gelten pro Timeframe
+      await Promise.all([this.loadAnalysis(), this.loadChart(), this.loadStrategies()]);
       await this.loadBacktest();
     },
 
@@ -209,11 +211,18 @@ function detailState() {
     // ---- Strategien + Backtest --------------------------------------------
 
     async ensureStrategies() {
-      if (this.strategies) return;
-      const resp = await fetch("/api/strategies");
+      if (this.strategies && this.strategiesTf === this.tf) return;
+      await this.loadStrategies();
+    },
+
+    async loadStrategies() {
+      const resp = await fetch("/api/strategies?tf=" + this.tf);
+      this.strategiesTf = this.tf;
       if (!resp.ok) { this.strategies = []; return; }
       this.strategies = await resp.json();
-      const active = this.strategies.find((s) => s.active) || this.strategies[0];
+      // Auswahl behalten, wenn möglich — aber Params des Timeframes übernehmen
+      const current = this.stratName && this.strategies.find((s) => s.name === this.stratName);
+      const active = current || this.strategies.find((s) => s.active) || this.strategies[0];
       if (active) this.selectStrategy(active.name, false);
     },
 
@@ -280,7 +289,7 @@ function detailState() {
     },
 
     async saveStrategy(setActive = false) {
-      const body = { params: this.stratParams };
+      const body = { params: this.stratParams, timeframe: this.tf };
       if (setActive) body.active = true;
       const resp = await fetch("/api/strategies/" + encodeURIComponent(this.stratName), {
         method: "PUT",
@@ -334,16 +343,44 @@ function detailState() {
       if (resp.ok) this.analysis.holding = target ? 1 : 0;
     },
 
+    // Anzeige des Auto-Trade-Zustands inkl. eingelockter Strategie
+    autotradeLabel() {
+      if (!this.analysis?.autotrade) return "Auto-Trade aus";
+      const s = this.analysis.strat_name || "aktive Strategie";
+      return "Auto-Trade an · " + s + " @ " + (this.analysis.strat_timeframe || "1d");
+    },
+
     async toggleAutotrade() {
       const target = !this.analysis.autotrade;
-      if (target && !confirm(this.symbol + " automatisch handeln (Paper-Account)? "
-          + "Der Worker kauft/verkauft dann eigenständig nach Signal.")) return;
+      const body = { autotrade: target };
+      if (target) {
+        // Lock-in: genau die Konfiguration einfrieren, die gerade im
+        // Backtest eingestellt ist (Strategie + Params + Timeframe).
+        const label = this.currentStrategy()?.label || this.stratName;
+        const paramsTxt = Object.entries(this.stratParams)
+          .map(([k, v]) => k + "=" + v).join(", ");
+        if (!confirm(this.symbol + " automatisch handeln (Paper-Account)?\n\n"
+            + "Eingelockt wird: " + label
+            + (paramsTxt ? " (" + paramsTxt + ")" : "")
+            + " auf " + (this.tf === "1h" ? "Stundenkerzen (1h)" : "Tageskerzen (1d)") + ".\n"
+            + "Der Worker kauft/verkauft eigenständig nach diesem Signal, "
+            + "bis Auto-Trade wieder ausgeschaltet wird.")) return;
+        body.strategy = this.stratName;
+        body.params = this.stratParams;
+        body.timeframe = this.tf;
+      }
       const resp = await fetch("/api/watchlist/" + encodeURIComponent(this.symbol), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ autotrade: target }),
+        body: JSON.stringify(body),
       });
-      if (resp.ok) this.analysis.autotrade = target ? 1 : 0;
+      if (!resp.ok) {
+        alert((await resp.json().catch(() => ({}))).error || "Auto-Trade umschalten fehlgeschlagen");
+        return;
+      }
+      this.analysis.autotrade = target ? 1 : 0;
+      this.analysis.strat_name = target ? this.stratName : null;
+      this.analysis.strat_timeframe = target ? this.tf : null;
     },
 
     flagSummary() {

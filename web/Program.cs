@@ -152,10 +152,13 @@ JsonElement? FindStrategySchema(JsonElement catalog, string name)
     return null;
 }
 
-// Normalerweise legt der Worker das Schema an; falls das Web zuerst dran ist.
+// Normalerweise legt der Worker das Schema an (inkl. Migration der alten
+// Ein-PK-Variante); falls das Web zuerst dran ist.
 void EnsureStrategyTable() => Execute(
     "CREATE TABLE IF NOT EXISTS strategy_config(" +
-    "name TEXT PRIMARY KEY, params_json TEXT, active INTEGER NOT NULL DEFAULT 0)");
+    "name TEXT NOT NULL, timeframe TEXT NOT NULL DEFAULT '1d', " +
+    "params_json TEXT, active INTEGER NOT NULL DEFAULT 0, " +
+    "PRIMARY KEY (name, timeframe))");
 
 // Params gegen das PARAMS-Schema klemmen; null bei nicht-numerischen Werten.
 // Unbekannte Keys werden verworfen — es erreicht nur validiertes JSON den Python-Spawn.
@@ -291,6 +294,7 @@ app.MapGet("/api/watchlist", () =>
 {
     var rows = Query("""
         SELECT w.symbol, w.name, w.holding, w.autotrade,
+               w.strat_name, w.strat_timeframe,
                a.as_of, a.action, a.signal, a.strategy, a.pillar_total,
                a.trend_score, a.momentum_score, a.macro_score, a.flags_json,
                (SELECT close FROM bars b WHERE b.symbol = w.symbol ORDER BY date DESC LIMIT 1) AS last_price,
@@ -377,7 +381,8 @@ app.MapGet("/api/symbols/{symbol}/bars", (string symbol, string? range, string? 
 app.MapGet("/api/symbols/{symbol}/analysis", (string symbol, string? tf) =>
 {
     var rows = Query("""
-        SELECT a.*, w.name, w.holding, w.autotrade FROM analysis a
+        SELECT a.*, w.name, w.holding, w.autotrade,
+               w.strat_name, w.strat_params, w.strat_timeframe FROM analysis a
         LEFT JOIN watchlist w ON w.symbol = a.symbol
         WHERE a.symbol = @s AND a.timeframe = @tf ORDER BY a.as_of DESC LIMIT 1
         """, ("@s", symbol.ToUpperInvariant()), ("@tf", tf == "1h" ? "1h" : "1d"));
@@ -385,6 +390,7 @@ app.MapGet("/api/symbols/{symbol}/analysis", (string symbol, string? tf) =>
     var row = rows[0];
     row["flags"] = ParseJson(row["flags_json"]);
     row["indicators"] = ParseJson(row["indicators_json"]);
+    row["strat_params"] = ParseJson(row["strat_params"]);
     row.Remove("flags_json");
     row.Remove("indicators_json");
     return Results.Json(row);
@@ -406,13 +412,15 @@ app.MapGet("/api/macro", () =>
 // Strategien + Backtesting
 // --------------------------------------------------------------------------
 
-app.MapGet("/api/strategies", async () =>
+app.MapGet("/api/strategies", async (string? tf) =>
 {
+    var timeframe = tf == "1h" ? "1h" : "1d";
     var catalog = await StrategyCatalog();
     if (catalog is null)
         return Results.Json(new { error = "Strategie-Liste nicht verfügbar (PythonPath prüfen)" }, statusCode: 503);
     EnsureStrategyTable();
-    var saved = Query("SELECT name, params_json, active FROM strategy_config")
+    var saved = Query("SELECT name, params_json, active FROM strategy_config WHERE timeframe = @tf",
+            ("@tf", timeframe))
         .ToDictionary(r => (string)r["name"]!);
 
     var rows = new List<Dictionary<string, object?>>();
@@ -446,6 +454,8 @@ app.MapPut("/api/strategies/{name}", async (string name, HttpRequest request) =>
         return Results.NotFound(new { error = $"unbekannte Strategie '{name}'" });
 
     var body = await JsonSerializer.DeserializeAsync<JsonElement>(request.Body);
+    var timeframe = body.TryGetProperty("timeframe", out var tfEl) && tfEl.GetString() == "1h"
+        ? "1h" : "1d";
     string? paramsJson = null;
     if (body.TryGetProperty("params", out var given))
     {
@@ -466,9 +476,11 @@ app.MapPut("/api/strategies/{name}", async (string name, HttpRequest request) =>
             activeVal = act.GetBoolean() ? 1 : 0;
             if (activeVal == 1)
             {
+                // "aktiv" gilt pro Timeframe — 1d- und 1h-Läufe haben je eine Strategie
                 using var off = con.CreateCommand();
                 off.Transaction = tx;
-                off.CommandText = "UPDATE strategy_config SET active = 0";
+                off.CommandText = "UPDATE strategy_config SET active = 0 WHERE timeframe = @tf";
+                off.Parameters.AddWithValue("@tf", timeframe);
                 off.ExecuteNonQuery();
             }
         }
@@ -476,25 +488,27 @@ app.MapPut("/api/strategies/{name}", async (string name, HttpRequest request) =>
         {
             using var cur = con.CreateCommand();
             cur.Transaction = tx;
-            cur.CommandText = "SELECT active FROM strategy_config WHERE name = @n";
+            cur.CommandText = "SELECT active FROM strategy_config WHERE name = @n AND timeframe = @tf";
             cur.Parameters.AddWithValue("@n", name);
+            cur.Parameters.AddWithValue("@tf", timeframe);
             activeVal = cur.ExecuteScalar() is long l ? l : 0;
         }
         using var up = con.CreateCommand();
         up.Transaction = tx;
         up.CommandText = """
-            INSERT INTO strategy_config(name, params_json, active) VALUES(@n, @p, @a)
-            ON CONFLICT(name) DO UPDATE SET
+            INSERT INTO strategy_config(name, timeframe, params_json, active) VALUES(@n, @tf, @p, @a)
+            ON CONFLICT(name, timeframe) DO UPDATE SET
               params_json = COALESCE(excluded.params_json, params_json),
               active = excluded.active
             """;
         up.Parameters.AddWithValue("@n", name);
+        up.Parameters.AddWithValue("@tf", timeframe);
         up.Parameters.AddWithValue("@p", (object?)paramsJson ?? DBNull.Value);
         up.Parameters.AddWithValue("@a", activeVal);
         up.ExecuteNonQuery();
         tx.Commit();
     }
-    return Results.Json(new { name, saved = paramsJson is not null, active = activeVal == 1 });
+    return Results.Json(new { name, timeframe, saved = paramsJson is not null, active = activeVal == 1 });
 });
 
 app.MapGet("/api/symbols/{symbol}/backtest", async (string symbol, string? strategy, string? @params, string? tf) =>
@@ -603,8 +617,41 @@ app.MapPatch("/api/watchlist/{symbol}", async (string symbol, HttpRequest reques
     }
     if (body.TryGetProperty("autotrade", out var at))
     {
+        var on = at.GetBoolean();
         sets.Add("autotrade = @a");
-        args.Add(("@a", at.GetBoolean() ? 1 : 0));
+        args.Add(("@a", on ? 1 : 0));
+        if (on)
+        {
+            // Lock-in: die im UI gewählte Strategie (+Params +Timeframe) wird
+            // eingefroren — Worker analysiert und Trader handelt das Symbol
+            // fortan exakt mit dieser Konfiguration, bis Auto-Trade aus geht.
+            var stratName = body.TryGetProperty("strategy", out var sEl) ? sEl.GetString() : null;
+            if (string.IsNullOrEmpty(stratName))
+                return Results.BadRequest(new { error = "autotrade an: strategy erforderlich" });
+            var lockTf = body.TryGetProperty("timeframe", out var tEl) && tEl.GetString() == "1h"
+                ? "1h" : "1d";
+            var catalog = await StrategyCatalog();
+            if (catalog is null)
+                return Results.Json(new { error = "Strategie-Liste nicht verfügbar (PythonPath prüfen)" }, statusCode: 503);
+            if (FindStrategySchema(catalog.Value, stratName) is not JsonElement schema)
+                return Results.NotFound(new { error = $"unbekannte Strategie '{stratName}'" });
+            JsonElement? givenParams = body.TryGetProperty("params", out var pEl) ? pEl : null;
+            var validated = ValidateParams(schema, givenParams);
+            if (validated is null)
+                return Results.BadRequest(new { error = "params: nur numerische Werte erlaubt" });
+            sets.Add("strat_name = @sn");
+            args.Add(("@sn", stratName));
+            sets.Add("strat_params = @sp");
+            args.Add(("@sp", JsonSerializer.Serialize(validated)));
+            sets.Add("strat_timeframe = @st");
+            args.Add(("@st", lockTf));
+        }
+        else
+        {
+            sets.Add("strat_name = NULL");
+            sets.Add("strat_params = NULL");
+            sets.Add("strat_timeframe = NULL");
+        }
     }
     if (sets.Count == 0)
         return Results.BadRequest(new { error = "holding oder autotrade erforderlich" });
