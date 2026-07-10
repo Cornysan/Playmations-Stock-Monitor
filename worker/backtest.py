@@ -8,13 +8,18 @@ funktioniert aber genauso von Hand:
   python backtest.py list                                    Strategien + Params-Schema
   python backtest.py run SYMBOL --strategy NAME [--params JSON] [--db PATH]
                      [--timeframe 1d|1h]
+  python backtest.py portfolio [--symbols A,B,C] …           Pott-Modell über
+                     mehrere Symbole (Default: die Watchlist aus der DB)
 
 Ausführungsmodell (--execution):
   next_open (Default)  Signal am Close von Bar t → Fill zur Eröffnung von t+1.
                        Entspricht dem Live-Trading (Worker läuft nach US-Close,
                        Alpaca queued Market-Orders zur nächsten Eröffnung).
   close                Fill zum Signal-Close selbst (optimistisch, alter Modus).
-Eine Position, all-in/all-out, keine Gebühren/Slippage (Alpaca: kommissionsfrei).
+Eine Position je Symbol, all-in/all-out. Alpaca ist kommissionsfrei, aber
+Market-Orders zahlen Spread + Slippage: --slippage-bps (Default 5 = 0,05 %)
+verschlechtert jeden Fill um diesen Satz (Käufe teurer, Verkäufe billiger);
+auch der Buy&Hold-Vergleich zahlt seinen Einstiegs-Fill.
 Die Macro-Säule liegt historisch nicht vor — Strategien laufen hier mit
 macro_score=None.
 
@@ -50,8 +55,10 @@ def load_bars(db_path, symbol: str, timeframe: str = "1d"):
 
 def run_backtest(dates: list[str], opens: list, highs: list, lows: list,
                  closes: list[float], strat, params: dict,
-                 execution: str = "next_open", risk: dict | None = None) -> dict:
+                 execution: str = "next_open", risk: dict | None = None,
+                 slippage_bps: float = 0.0) -> dict:
     n = len(closes)
+    slip = (slippage_bps or 0.0) / 10000.0  # je Fill-Seite: Buy × (1+slip), Sell × (1−slip)
     signals: list[dict] = []
     trades: list[dict] = []
     equity: list[dict] = []
@@ -111,13 +118,14 @@ def run_backtest(dates: list[str], opens: list, highs: list, lows: list,
 
         # 1. next_open: gestriges Signal zur heutigen Eröffnung ausführen
         if pending == "buy" and not in_pos:
-            px = open_or_close(i)
+            base = open_or_close(i)
+            px = round(base * (1 + slip), 4)
             in_pos, entered_at_open = True, True
             entry_date, entry_price, entry_idx = dates[i], px, i
-            pos_peak = px
+            pos_peak = base  # Trailing-Basis bleibt der Marktkurs, nicht der Fill
             signals.append({"date": dates[i], "type": "buy", "price": px})
         elif pending == "sell" and in_pos:
-            px = open_or_close(i)
+            px = round(open_or_close(i) * (1 - slip), 4)
             eq *= px / ref_close
             close_trade(i, px, "signal")
         pending = None
@@ -134,9 +142,10 @@ def run_backtest(dates: list[str], opens: list, highs: list, lows: list,
             elif low <= level:
                 stopped_px = level
             if stopped_px is not None:
+                stopped_px = round(stopped_px * (1 - slip), 4)
                 eq *= stopped_px / (entry_price if entered_at_open else ref_close)
                 bars_in_market += 1
-                close_trade(i, round(stopped_px, 4), reason)
+                close_trade(i, stopped_px, reason)
 
         # 3. Equity über den heutigen Bar fortschreiben
         if stopped_px is None:
@@ -155,12 +164,17 @@ def run_backtest(dates: list[str], opens: list, highs: list, lows: list,
         if execution == "close":
             if sig == "BUY" and not in_pos:
                 in_pos = True
-                entry_date, entry_price, entry_idx = dates[i], closes[i], i
+                px = round(closes[i] * (1 + slip), 4)
+                entry_date, entry_price, entry_idx = dates[i], px, i
                 pos_peak = closes[i]
-                signals.append({"date": dates[i], "type": "buy", "price": closes[i]})
+                # Equity-Kette läuft über Closes → Slippage-Kosten sofort verbuchen
+                eq *= closes[i] / px
+                signals.append({"date": dates[i], "type": "buy", "price": px})
             elif sig == "SELL" and in_pos:
                 # Equity ist in Schritt 3 bereits bis zum Close fortgeschrieben
-                close_trade(i, closes[i], "signal")
+                px = round(closes[i] * (1 - slip), 4)
+                eq *= px / closes[i]
+                close_trade(i, px, "signal")
         else:
             if (sig == "BUY" and not in_pos) or (sig == "SELL" and in_pos):
                 pending = sig.lower()
@@ -200,7 +214,8 @@ def run_backtest(dates: list[str], opens: list, highs: list, lows: list,
 
     stats = {
         "total_return_pct": pct((eq - 1) * 100),
-        "buy_hold_return_pct": pct((closes[-1] / closes[WARMUP] - 1) * 100),
+        # fairer Vergleich: auch Buy&Hold zahlt seinen Einstiegs-Fill
+        "buy_hold_return_pct": pct((closes[-1] / (closes[WARMUP] * (1 + slip)) - 1) * 100),
         "n_trades": len(trades),
         "n_closed": len(closed),
         "win_rate_pct": pct(len(wins) / len(closed) * 100) if closed else None,
@@ -213,6 +228,207 @@ def run_backtest(dates: list[str], opens: list, highs: list, lows: list,
                              if t.get("exit_reason") in ("stop", "trail")]),
     }
     return {"signals": signals, "trades": trades, "stats": stats, "equity": equity}
+
+
+def run_portfolio(all_bars: dict[str, tuple], strat, params: dict,
+                  risk: dict | None = None, slippage_bps: float = 0.0) -> dict:
+    """Pott-Modell wie trader.py: ein gemeinsamer Cash-Topf, Pott = Equity / N,
+    all-in/all-out je Symbol, Ausführung immer zur nächsten eigenen Eröffnung.
+    Start-Equity ist auf 1.0 normiert; Buys investieren min(Pott, Cash)."""
+    risk = risk or {}
+    stop_pct = risk.get("stop_loss_pct")
+    trail_pct = risk.get("trail_pct")
+    slip = (slippage_bps or 0.0) / 10000.0
+
+    syms = sorted(all_bars)
+    n = len(syms)
+    st: dict[str, dict] = {}
+    for s in syms:
+        dates, opens, highs, lows, closes = all_bars[s]
+        st[s] = {
+            "dates": dates, "opens": opens, "highs": highs, "lows": lows,
+            "closes": closes, "idx": {d: i for i, d in enumerate(dates)},
+            "qty": 0.0, "entry_price": None, "entry_date": None, "entry_bar": None,
+            "pos_peak": None, "pending": None, "contrib": 0.0,
+            "last_px": None,  # letzter bekannter Kurs — Mark für Equity/Pott
+        }
+
+    def open_px(x, i):
+        return x["opens"][i] if x["opens"][i] is not None else x["closes"][i]
+
+    cash = 1.0
+    trades: list[dict] = []
+    equity: list[dict] = []
+    peak, max_dd = 1.0, 0.0
+    invested_sum, invested_n = 0.0, 0
+
+    def mark_equity() -> float:
+        return cash + sum(x["qty"] * x["last_px"] for x in st.values()
+                          if x["qty"] and x["last_px"] is not None)
+
+    def close_pos(s: str, x: dict, date: str, i: int, px: float, reason: str) -> None:
+        nonlocal cash
+        px = round(px, 4)
+        cash += x["qty"] * px
+        x["contrib"] += x["qty"] * (px - x["entry_price"])
+        trades.append({
+            "symbol": s,
+            "entry_date": x["entry_date"], "entry_price": x["entry_price"],
+            "exit_date": date, "exit_price": px,
+            "pnl_pct": round((px / x["entry_price"] - 1) * 100, 2),
+            "bars_held": i - x["entry_bar"],
+            "open": False, "exit_reason": reason,
+        })
+        x["qty"], x["entry_price"], x["pos_peak"] = 0.0, None, None
+
+    timeline = sorted({d for s in syms for d in all_bars[s][0]})
+    # Equity-Kurve erst ab dem Punkt, an dem das erste Symbol handeln darf
+    start = min(x["dates"][WARMUP] for x in st.values())
+
+    for date in timeline:
+        active = [(s, st[s]["idx"][date]) for s in syms if date in st[s]["idx"]]
+        entered: set[str] = set()
+
+        # 0. Marks auf die heutige Eröffnung — Basis für Pott-Sizing (wie das
+        #    Konto-Equity zum Zeitpunkt der Order im Live-Trading)
+        for s, i in active:
+            st[s]["last_px"] = open_px(st[s], i)
+
+        # 1a. Pending-Sells zur Eröffnung füllen (Cash wird für Buys frei)
+        for s, i in active:
+            x = st[s]
+            if x["pending"] == "sell":
+                x["pending"] = None
+                if x["qty"]:
+                    close_pos(s, x, date, i, open_px(x, i) * (1 - slip), "signal")
+
+        # 1b. Pending-Buys zur Eröffnung füllen — Pott = Equity/N, gedeckelt aufs Cash
+        for s, i in active:
+            x = st[s]
+            if x["pending"] == "buy":
+                x["pending"] = None
+                if x["qty"]:
+                    continue
+                pot = mark_equity() / n
+                budget = min(pot, cash)
+                if budget < 0.01 * pot:  # Spiegel des Cash-Checks in trader.trade
+                    continue
+                base = open_px(x, i)
+                px = base * (1 + slip)
+                x["qty"] = budget / px
+                cash -= budget
+                x["entry_price"] = round(px, 4)
+                x["entry_date"], x["entry_bar"] = date, i
+                x["pos_peak"] = base
+                entered.add(s)
+
+        # 2. Stop-Check intra-Kerze (Level aus dem Stand VOR der Kerze)
+        for s, i in active:
+            x = st[s]
+            if not x["qty"] or not (stop_pct or trail_pct):
+                continue
+            best = None
+            if stop_pct:
+                best = (x["entry_price"] * (1 - stop_pct / 100.0), "stop")
+            if trail_pct and x["pos_peak"] is not None:
+                t = (x["pos_peak"] * (1 - trail_pct / 100.0), "trail")
+                if best is None or t[0] > best[0]:
+                    best = t
+            level, reason = best
+            o = open_px(x, i)
+            low = x["lows"][i] if x["lows"][i] is not None else x["closes"][i]
+            if s not in entered and o <= level:
+                close_pos(s, x, date, i, o * (1 - slip), reason)
+            elif low <= level:
+                close_pos(s, x, date, i, level * (1 - slip), reason)
+
+        # 3. Entscheidung auf dem Close, Ausführung zur nächsten eigenen Eröffnung
+        for s, i in active:
+            x = st[s]
+            x["last_px"] = x["closes"][i]
+            if i < WARMUP:
+                continue
+            card = strategies.run(strat, x["closes"][: i + 1],
+                                  holding=bool(x["qty"]), params=params)
+            sig = card["signal"]
+            if (sig == "BUY" and not x["qty"]) or (sig == "SELL" and x["qty"]):
+                x["pending"] = sig.lower()
+
+        # 4. Trailing-Basis erst NACH allen Checks mit dem heutigen Hoch nachziehen
+        for s, i in active:
+            x = st[s]
+            if x["qty"] and trail_pct:
+                h = x["highs"][i] if x["highs"][i] is not None else x["closes"][i]
+                x["pos_peak"] = max(x["pos_peak"], h)
+
+        if date >= start:
+            eq = mark_equity()
+            peak = max(peak, eq)
+            max_dd = max(max_dd, 1.0 - eq / peak)
+            invested_sum += (eq - cash) / eq
+            invested_n += 1
+            equity.append({"date": date, "value": round(eq, 6)})
+
+    # Offene Positionen mark-to-market, Rest-Beiträge einsammeln
+    for s in syms:
+        x = st[s]
+        if x["qty"]:
+            last = x["closes"][-1]
+            x["contrib"] += x["qty"] * (last - x["entry_price"])
+            trades.append({
+                "symbol": s,
+                "entry_date": x["entry_date"], "entry_price": x["entry_price"],
+                "exit_date": None, "exit_price": last,
+                "pnl_pct": round((last / x["entry_price"] - 1) * 100, 2),
+                "bars_held": len(x["dates"]) - 1 - x["entry_bar"],
+                "open": True, "exit_reason": None,
+            })
+
+    eq_final = mark_equity()
+    closed = [t for t in trades if not t["open"]]
+    wins = [t for t in closed if t["pnl_pct"] > 0]
+    losses = [t for t in closed if t["pnl_pct"] <= 0]
+    gross_win = sum(t["pnl_pct"] for t in wins)
+    gross_loss = -sum(t["pnl_pct"] for t in losses)
+
+    def pct(x):
+        return round(x, 2) if x is not None else None
+
+    # Benchmark: Pott gleich verteilt und liegen lassen — jedes Symbol wird ab
+    # seinem eigenen Warmup-Ende gekauft (inkl. Einstiegs-Slippage)
+    bh_final = sum(x["closes"][-1] / (x["closes"][WARMUP] * (1 + slip))
+                   for x in st.values()) / n
+
+    trades.sort(key=lambda t: (t["entry_date"], t["symbol"]))
+    stats = {
+        "total_return_pct": pct((eq_final - 1) * 100),
+        "buy_hold_return_pct": pct((bh_final - 1) * 100),
+        "n_trades": len(trades),
+        "n_closed": len(closed),
+        "win_rate_pct": pct(len(wins) / len(closed) * 100) if closed else None,
+        "avg_win_pct": pct(gross_win / len(wins)) if wins else None,
+        "avg_loss_pct": pct(-gross_loss / len(losses)) if losses else None,
+        "profit_factor": round(gross_win / gross_loss, 2) if gross_loss > 0 else None,
+        "max_drawdown_pct": pct(max_dd * 100),
+        "avg_invested_pct": pct(invested_sum / invested_n * 100) if invested_n else None,
+        "n_stop_exits": len([t for t in closed
+                             if t.get("exit_reason") in ("stop", "trail")]),
+    }
+    per_symbol = []
+    for s in syms:
+        ts = [t for t in trades if t["symbol"] == s]
+        cs = [t for t in ts if not t["open"]]
+        w = [t for t in cs if t["pnl_pct"] > 0]
+        per_symbol.append({
+            "symbol": s,
+            "n_trades": len(ts),
+            "win_rate_pct": pct(len(w) / len(cs) * 100) if cs else None,
+            # Beitrag zum Gesamtergebnis in Prozentpunkten des Startkapitals
+            "contribution_pct": pct(st[s]["contrib"] * 100),
+            "open": bool(st[s]["qty"]),
+        })
+    return {"trades": trades, "stats": stats, "equity": equity,
+            "per_symbol": per_symbol}
 
 
 def parse_risk(raw: str | None) -> dict:
@@ -237,22 +453,32 @@ def parse_risk(raw: str | None) -> dict:
     return out
 
 
-def cmd_run(args) -> int:
+def _parse_common(args):
+    """Strategie + Params + Risk + Slippage validieren.
+    Liefert (strat, resolved_params, risk, slippage_bps) oder wirft ValueError."""
     strat = strategies.get(args.strategy)
     if strat is None:
-        print(json.dumps({"error": f"unbekannte Strategie {args.strategy!r}"}))
-        return 1
+        raise ValueError(f"unbekannte Strategie {args.strategy!r}")
     try:
         params = json.loads(args.params) if args.params else {}
         if not isinstance(params, dict):
             raise ValueError("params must be a JSON object")
     except ValueError as e:
-        print(json.dumps({"error": f"ungültige Params: {e}"}))
-        return 1
+        raise ValueError(f"ungültige Params: {e}") from None
     try:
         risk = parse_risk(args.risk)
     except ValueError as e:
-        print(json.dumps({"error": f"ungültiges Risk-Overlay: {e}"}))
+        raise ValueError(f"ungültiges Risk-Overlay: {e}") from None
+    if not 0 <= args.slippage_bps <= 100:
+        raise ValueError("slippage-bps muss zwischen 0 und 100 liegen")
+    return strat, strategies.resolve_params(strat, params), risk, args.slippage_bps
+
+
+def cmd_run(args) -> int:
+    try:
+        strat, resolved, risk, slippage = _parse_common(args)
+    except ValueError as e:
+        print(json.dumps({"error": str(e)}, ensure_ascii=False))
         return 1
 
     symbol = args.symbol.upper()
@@ -263,9 +489,8 @@ def cmd_run(args) -> int:
                                    f"({len(closes)}, benötigt >{WARMUP})"}))
         return 1
 
-    resolved = strategies.resolve_params(strat, params)
     result = run_backtest(dates, opens, highs, lows, closes, strat, resolved,
-                          args.execution, risk)
+                          args.execution, risk, slippage)
     result["meta"] = {
         "symbol": symbol,
         "strategy": strat.NAME,
@@ -276,6 +501,59 @@ def cmd_run(args) -> int:
         "execution": args.execution,
         "timeframe": args.timeframe,
         "risk": risk or None,
+        "slippage_bps": slippage,
+        "macro": None,
+    }
+    print(json.dumps(result, ensure_ascii=False))
+    return 0
+
+
+def cmd_portfolio(args) -> int:
+    try:
+        strat, resolved, risk, slippage = _parse_common(args)
+    except ValueError as e:
+        print(json.dumps({"error": str(e)}, ensure_ascii=False))
+        return 1
+
+    db_path = args.db or config.DB_PATH
+    if args.symbols:
+        symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
+    else:
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            symbols = [r[0] for r in con.execute(
+                "SELECT symbol FROM watchlist ORDER BY symbol")]
+        finally:
+            con.close()
+    if not symbols:
+        print(json.dumps({"error": "keine Symbole (Watchlist leer?)"}))
+        return 1
+
+    all_bars, skipped = {}, {}
+    for sym in dict.fromkeys(symbols):
+        bars = load_bars(db_path, sym, args.timeframe)
+        if len(bars[4]) <= WARMUP:
+            skipped[sym] = f"zu wenig Bars ({len(bars[4])}, benötigt >{WARMUP})"
+        else:
+            all_bars[sym] = bars
+    if not all_bars:
+        print(json.dumps({"error": "kein Symbol hat genug Historie",
+                          "skipped": skipped}, ensure_ascii=False))
+        return 1
+
+    result = run_portfolio(all_bars, strat, resolved, risk, slippage)
+    timeline_from = min(b[0][WARMUP] for b in all_bars.values())
+    result["meta"] = {
+        "symbols": sorted(all_bars),
+        "skipped": skipped or None,
+        "strategy": strat.NAME,
+        "params": resolved,
+        "from": timeline_from,
+        "to": max(b[0][-1] for b in all_bars.values()),
+        "execution": "next_open",
+        "timeframe": args.timeframe,
+        "risk": risk or None,
+        "slippage_bps": slippage,
         "macro": None,
     }
     print(json.dumps(result, ensure_ascii=False))
@@ -286,23 +564,35 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Strategy backtester (JSON output).")
     sub = ap.add_subparsers(dest="command", required=True)
     sub.add_parser("list", help="Strategien + Params-Schemata")
+
+    def add_common(p):
+        p.add_argument("--strategy", default=strategies.DEFAULT)
+        p.add_argument("--params", help="JSON-Objekt mit Param-Overrides")
+        p.add_argument("--timeframe", choices=["1d", "1h"], default="1d",
+                       help="1h testet auf Stundenkerzen (Tabelle bars_1h)")
+        p.add_argument("--risk", help='Risk-Overlay, z. B. {"trail_pct": 3} — '
+                                      "Stops werden intra-Kerze gegen Open/Low simuliert")
+        p.add_argument("--slippage-bps", type=float, default=5.0,
+                       help="Fill-Abschlag in Basispunkten je Seite "
+                            "(Default 5 = 0,05 %%; 0 = aus)")
+        p.add_argument("--db", help="Pfad zur SQLite-DB (Default: config.DB_PATH)")
+
     run_p = sub.add_parser("run", help="Backtest für ein Symbol")
     run_p.add_argument("symbol")
-    run_p.add_argument("--strategy", default=strategies.DEFAULT)
-    run_p.add_argument("--params", help="JSON-Objekt mit Param-Overrides")
     run_p.add_argument("--execution", choices=["next_open", "close"],
                        default="next_open")
-    run_p.add_argument("--timeframe", choices=["1d", "1h"], default="1d",
-                       help="1h testet auf Stundenkerzen (Tabelle bars_1h)")
-    run_p.add_argument("--risk", help='Risk-Overlay, z. B. {"trail_pct": 3} — '
-                                      "Stops werden intra-Kerze gegen Open/Low simuliert")
-    run_p.add_argument("--db", help="Pfad zur SQLite-DB (Default: config.DB_PATH)")
-    args = ap.parse_args()
+    add_common(run_p)
 
+    pf_p = sub.add_parser("portfolio", help="Pott-Modell-Backtest über mehrere "
+                                            "Symbole (wie trader.py)")
+    pf_p.add_argument("--symbols", help="Kommagetrennt; Default: Watchlist aus der DB")
+    add_common(pf_p)
+
+    args = ap.parse_args()
     if args.command == "list":
         print(json.dumps(strategies.list_all(), ensure_ascii=False))
         return 0
-    return cmd_run(args)
+    return cmd_portfolio(args) if args.command == "portfolio" else cmd_run(args)
 
 
 if __name__ == "__main__":

@@ -12,6 +12,12 @@
       "runtimeExecutable": "C:\\Program Files\\dotnet\\dotnet.exe",
       "runtimeArgs": ["run", "--project", "web", "--no-launch-profile", "-c", "Release", "--", "--urls", "http://127.0.0.1:5077", "--environment", "Development"],
       "port": 5077
+    },
+    {
+      "name": "stocks-web-alt2",
+      "runtimeExecutable": "C:\\Program Files\\dotnet\\dotnet.exe",
+      "runtimeArgs": ["run", "--project", "web", "--no-launch-profile", "-c", "Release", "-p:BaseOutputPath=bin\\alt2\\", "--", "--urls", "http://127.0.0.1:5111", "--environment", "Development"],
+      "port": 5111
     }
   ]
 }

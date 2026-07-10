@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -102,7 +103,7 @@ if (string.IsNullOrEmpty(pythonPath))
         : (OperatingSystem.IsWindows() ? "python" : "python3");
 }
 
-async Task<(int Code, string Stdout, string Stderr)> RunPython(params string[] args)
+async Task<(int Code, string Stdout, string Stderr)> RunPython(string[] args, int timeoutSeconds = 30)
 {
     var psi = new ProcessStartInfo
     {
@@ -118,7 +119,7 @@ async Task<(int Code, string Stdout, string Stderr)> RunPython(params string[] a
     using var proc = Process.Start(psi)!;
     var stdout = proc.StandardOutput.ReadToEndAsync();
     var stderr = proc.StandardError.ReadToEndAsync();
-    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
     try { await proc.WaitForExitAsync(cts.Token); }
     catch (OperationCanceledException)
     {
@@ -133,7 +134,7 @@ async Task<JsonElement?> StrategyCatalog()
 {
     var cache = app.Services.GetRequiredService<IMemoryCache>();
     if (cache.TryGetValue("strategies:catalog", out JsonElement cached)) return cached;
-    var (code, stdout, stderr) = await RunPython("list");
+    var (code, stdout, stderr) = await RunPython(new[] { "list" });
     if (code != 0)
     {
         app.Logger.LogError("backtest.py list fehlgeschlagen ({Code}): {Err}", code, stderr);
@@ -175,6 +176,17 @@ JsonElement? FindStrategySchema(JsonElement catalog, string name)
         result[p.Name] = v;
     }
     return (result.Count == 0 ? null : JsonSerializer.Serialize(result), null);
+}
+
+// Slippage in Basispunkten je Fill-Seite; null = Python-Default (5 bp).
+// Spiegel der Regeln in worker/backtest.py _parse_common.
+(string? Canonical, string? Error) ValidateSlippage(string? raw)
+{
+    if (string.IsNullOrWhiteSpace(raw)) return (null, null);
+    if (!double.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out var v)
+        || v < 0 || v > 100)
+        return (null, "slippage: Zahl zwischen 0 und 100 (Basispunkte)");
+    return (v.ToString(CultureInfo.InvariantCulture), null);
 }
 
 // Normalerweise legt der Worker das Schema an (inkl. Migration der alten
@@ -537,13 +549,16 @@ app.MapPut("/api/strategies/{name}", async (string name, HttpRequest request) =>
     return Results.Json(new { name, timeframe, saved = paramsJson is not null, active = activeVal == 1 });
 });
 
-app.MapGet("/api/symbols/{symbol}/backtest", async (string symbol, string? strategy, string? @params, string? tf, string? risk) =>
+app.MapGet("/api/symbols/{symbol}/backtest", async (string symbol, string? strategy, string? @params, string? tf, string? risk, string? slippage) =>
 {
     symbol = symbol.ToUpperInvariant();
     var timeframe = tf == "1h" ? "1h" : "1d";
     var (riskCanonical, riskError) = ValidateRisk(risk);
     if (riskError is not null)
         return Results.BadRequest(new { error = riskError });
+    var (slipCanonical, slipError) = ValidateSlippage(slippage);
+    if (slipError is not null)
+        return Results.BadRequest(new { error = slipError });
     var catalog = await StrategyCatalog();
     if (catalog is null)
         return Results.Json(new { error = "Backtest nicht verfügbar (PythonPath prüfen)" }, statusCode: 503);
@@ -570,7 +585,7 @@ app.MapGet("/api/symbols/{symbol}/backtest", async (string symbol, string? strat
         return Results.NotFound(new { error = "no bars for symbol" });
 
     var cache = app.Services.GetRequiredService<IMemoryCache>();
-    var key = $"bt:{symbol}:{strategy}:{canonical}:{timeframe}:{riskCanonical}:{lastDate}";
+    var key = $"bt:{symbol}:{strategy}:{canonical}:{timeframe}:{riskCanonical}:{slipCanonical}:{lastDate}";
     if (cache.TryGetValue(key, out string? cached) && cached is not null)
         return Results.Content(cached, "application/json");
 
@@ -578,6 +593,7 @@ app.MapGet("/api/symbols/{symbol}/backtest", async (string symbol, string? strat
         "--strategy", strategy, "--params", canonical, "--timeframe", timeframe,
         "--db", dbPath };
     if (riskCanonical is not null) { btArgs.Add("--risk"); btArgs.Add(riskCanonical); }
+    if (slipCanonical is not null) { btArgs.Add("--slippage-bps"); btArgs.Add(slipCanonical); }
     var (code, stdout, stderr) = await RunPython(btArgs.ToArray());
     if (code != 0)
     {
@@ -587,6 +603,71 @@ app.MapGet("/api/symbols/{symbol}/backtest", async (string symbol, string? strat
         var payload = stdout.TrimStart().StartsWith('{')
             ? stdout
             : JsonSerializer.Serialize(new { error = "Backtest fehlgeschlagen" });
+        return Results.Content(payload, "application/json", null, 422);
+    }
+    cache.Set(key, stdout, TimeSpan.FromHours(1));
+    return Results.Content(stdout, "application/json");
+});
+
+// Portfolio-Backtest: Pott-Modell (wie trader.py) über die ganze Watchlist,
+// eine Strategie-Konfiguration für alle Symbole. Läuft deutlich länger als
+// ein Einzel-Backtest → eigenes Timeout.
+app.MapGet("/api/portfolio/backtest", async (string? strategy, string? @params, string? tf, string? risk, string? slippage) =>
+{
+    var timeframe = tf == "1h" ? "1h" : "1d";
+    var (riskCanonical, riskError) = ValidateRisk(risk);
+    if (riskError is not null)
+        return Results.BadRequest(new { error = riskError });
+    var (slipCanonical, slipError) = ValidateSlippage(slippage);
+    if (slipError is not null)
+        return Results.BadRequest(new { error = slipError });
+    var catalog = await StrategyCatalog();
+    if (catalog is null)
+        return Results.Json(new { error = "Backtest nicht verfügbar (PythonPath prüfen)" }, statusCode: 503);
+    strategy ??= "three_pillars";
+    if (FindStrategySchema(catalog.Value, strategy) is not JsonElement schema)
+        return Results.NotFound(new { error = $"unbekannte Strategie '{strategy}'" });
+
+    JsonElement? given = null;
+    if (!string.IsNullOrEmpty(@params))
+    {
+        try { given = JsonSerializer.Deserialize<JsonElement>(@params); }
+        catch (JsonException) { return Results.BadRequest(new { error = "params: kein gültiges JSON" }); }
+    }
+    var validated = ValidateParams(schema, given);
+    if (validated is null)
+        return Results.BadRequest(new { error = "params: nur numerische Werte erlaubt" });
+    var canonical = JsonSerializer.Serialize(validated);
+
+    var symbols = Query("SELECT symbol FROM watchlist ORDER BY symbol")
+        .Select(r => (string)r["symbol"]!).ToList();
+    if (symbols.Count == 0)
+        return Results.NotFound(new { error = "Watchlist ist leer" });
+
+    var last = Query(timeframe == "1h"
+        ? "SELECT MAX(ts) d FROM bars_1h WHERE close IS NOT NULL"
+        : "SELECT MAX(date) d FROM bars WHERE close IS NOT NULL");
+    if (last.Count == 0 || last[0]["d"] is not string lastDate)
+        return Results.NotFound(new { error = "keine Bars in der DB" });
+
+    var cache = app.Services.GetRequiredService<IMemoryCache>();
+    var key = $"pf:{string.Join(",", symbols)}:{strategy}:{canonical}:{timeframe}:{riskCanonical}:{slipCanonical}:{lastDate}";
+    if (cache.TryGetValue(key, out string? cached) && cached is not null)
+        return Results.Content(cached, "application/json");
+
+    var pfArgs = new List<string> { "portfolio", "--symbols", string.Join(",", symbols),
+        "--strategy", strategy, "--params", canonical, "--timeframe", timeframe,
+        "--db", dbPath };
+    if (riskCanonical is not null) { pfArgs.Add("--risk"); pfArgs.Add(riskCanonical); }
+    if (slipCanonical is not null) { pfArgs.Add("--slippage-bps"); pfArgs.Add(slipCanonical); }
+    var (code, stdout, stderr) = await RunPython(pfArgs.ToArray(), timeoutSeconds: 120);
+    if (code != 0)
+    {
+        app.Logger.LogError("Portfolio-Backtest {Strategy} fehlgeschlagen ({Code}): {Err}",
+            strategy, code, string.IsNullOrEmpty(stderr) ? stdout : stderr);
+        var payload = stdout.TrimStart().StartsWith('{')
+            ? stdout
+            : JsonSerializer.Serialize(new { error = "Portfolio-Backtest fehlgeschlagen" });
         return Results.Content(payload, "application/json", null, 422);
     }
     cache.Set(key, stdout, TimeSpan.FromHours(1));

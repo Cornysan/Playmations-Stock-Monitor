@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>stocks.playmations.com</title>
   <link rel="stylesheet" href="/css/app.css?v=8">
-  <script src="/js/app.js?v=8"></script>
+  <script src="/js/app.js?v=9"></script>
   <script src="/js/lightweight-charts.standalone.production.js"></script>
   <script defer src="/js/alpine.min.js"></script>
 </head>
@@ -134,6 +134,52 @@
           </div>
         </div>
       </div>
+
+      <!-- Portfolio-Backtest: Pott-Modell (wie Auto-Trading) über die ganze Watchlist -->
+      <div class="acc">
+        <button @click="openPf = !openPf">
+          <span class="chev" :class="{ open: openPf }">▶</span> Portfolio-Backtest
+          <span class="summary" x-text="pfSummary()"></span>
+        </button>
+        <div class="body" x-cloak x-show="openPf">
+          <div class="bt-note" style="margin:8px 0">
+            Pott-Modell wie im Auto-Trading: ein Kapitaltopf, Pott = Equity / Anzahl Symbole,
+            all-in/all-out je Symbol. Nutzt Strategie, Parameter, Stops und Slippage aus dem
+            Panel rechts (<span x-text="tf === '1h' ? 'Stundenkerzen' : 'Tageskerzen'"></span>).
+          </div>
+          <button class="mini-btn accent" @click="runPortfolio()" :disabled="pfLoading"
+                  x-text="pfLoading ? 'läuft… (kann eine Minute dauern)' : 'Backtest über die Watchlist starten'"></button>
+          <div class="bt-error" x-show="pfError" x-text="pfError"></div>
+          <template x-if="pf">
+            <div>
+              <div class="bt-grid" style="margin-top:10px">
+                <template x-for="row in pfRows()" :key="row[0]">
+                  <div class="bt-cell">
+                    <div class="bt-label" x-text="row[0]"></div>
+                    <div class="bt-value" :class="row[2]" x-text="row[1]"></div>
+                  </div>
+                </template>
+              </div>
+              <table class="trades" x-show="(pf.per_symbol || []).length">
+                <thead>
+                  <tr><th>Symbol</th><th class="num">Trades</th><th class="num">Win-Rate</th><th class="num">Beitrag</th></tr>
+                </thead>
+                <tbody>
+                  <template x-for="p in pfPerSymbol()" :key="p.symbol">
+                    <tr>
+                      <td class="sym-cell"><span x-text="p.symbol"></span><span class="t-price" x-show="p.open"> · offen</span></td>
+                      <td class="num" x-text="p.n_trades"></td>
+                      <td class="num" x-text="p.win_rate_pct != null ? p.win_rate_pct.toFixed(0) + '%' : '—'"></td>
+                      <td class="num" :class="signClass(p.contribution_pct)" x-text="fmtPct(p.contribution_pct)"></td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+              <div class="bt-note" x-text="pfNote()"></div>
+            </div>
+          </template>
+        </div>
+      </div>
     </div>
 
     <!-- ================= rechte Spalte: Chart + Analyse ================= -->
@@ -193,6 +239,11 @@
               <span>Trail %</span>
               <input type="number" min="0.1" max="50" step="0.5"
                      x-model.number="risk.trail_pct" @change="loadBacktest()">
+            </label>
+            <label class="param" title="Fill-Abschlag in Basispunkten je Seite (Spread + Slippage): Käufe füllen teurer, Verkäufe billiger. 5 bp = 0,05 %. 0 = aus.">
+              <span>Slip bp</span>
+              <input type="number" min="0" max="100" step="1"
+                     x-model.number="slippageBps" @change="loadBacktest()">
             </label>
             <span class="bt-loading" x-cloak x-show="btLoading">…</span>
             <span class="spacer"></span>
@@ -381,6 +432,10 @@ function watchlistApp() {
     sortDir: 1,
     trading: null,
     openTrading: false,
+    pf: null,
+    pfError: null,
+    pfLoading: false,
+    openPf: false,
     isDesktop: window.matchMedia("(min-width: 1000px)").matches,
 
     async init() {
@@ -422,6 +477,76 @@ function watchlistApp() {
       if (o.error || o.status === "rejected" || o.status === "canceled") return "neg";
       if (o.status === "filled") return "pos";
       return "";
+    },
+
+    // ---- Portfolio-Backtest (Pott-Modell über die Watchlist) ----
+    async runPortfolio() {
+      this.pfLoading = true;
+      this.pfError = null;
+      const riskObj = this.riskObject();
+      const url = "/api/portfolio/backtest"
+        + "?strategy=" + encodeURIComponent(this.stratName || "three_pillars")
+        + "&tf=" + this.tf
+        + "&params=" + encodeURIComponent(JSON.stringify(this.stratParams || {}))
+        + (Object.keys(riskObj).length ? "&risk=" + encodeURIComponent(JSON.stringify(riskObj)) : "")
+        + this.slippageQuery();
+      const resp = await fetch(url).catch(() => null);
+      this.pfLoading = false;
+      if (!resp || !resp.ok) {
+        this.pf = null;
+        this.pfError = resp
+          ? (await resp.json().catch(() => ({}))).error || "Portfolio-Backtest fehlgeschlagen"
+          : "Portfolio-Backtest fehlgeschlagen";
+        return;
+      }
+      this.pf = await resp.json();
+    },
+
+    pfSummary() {
+      if (this.pfError) return this.pfError;
+      const st = this.pf?.stats;
+      if (!st) return this.pfLoading ? "läuft…" : "";
+      return fmtPct(st.total_return_pct) + " · B&H " + fmtPct(st.buy_hold_return_pct)
+        + " · " + st.n_trades + " Trades";
+    },
+
+    pfRows() {
+      const st = this.pf?.stats;
+      if (!st) return [];
+      return [
+        ["Rendite", fmtPct(st.total_return_pct), signClass(st.total_return_pct)],
+        ["Buy & Hold", fmtPct(st.buy_hold_return_pct), signClass(st.buy_hold_return_pct)],
+        ["Trades", String(st.n_trades), ""],
+        ["Win-Rate", st.win_rate_pct != null ? st.win_rate_pct.toFixed(0) + "%" : "—", ""],
+        ["Profit-Faktor", st.profit_factor != null ? String(st.profit_factor) : "—", ""],
+        ["Max Drawdown", st.max_drawdown_pct != null ? "−" + st.max_drawdown_pct + "%" : "—", "neg"],
+        ["Ø investiert", st.avg_invested_pct != null ? st.avg_invested_pct.toFixed(0) + "%" : "—", ""],
+        ["Stop-Exits", String(st.n_stop_exits ?? 0), ""],
+      ];
+    },
+
+    // Symbole mit dem größten Einfluss zuerst (Beitrag in %-Punkten des Startkapitals)
+    pfPerSymbol() {
+      return [...(this.pf?.per_symbol || [])]
+        .sort((a, b) => Math.abs(b.contribution_pct ?? 0) - Math.abs(a.contribution_pct ?? 0));
+    },
+
+    pfNote() {
+      const m = this.pf?.meta || {};
+      const risk = m.risk
+        ? " · Risk: " + [m.risk.stop_loss_pct != null ? "Stop " + m.risk.stop_loss_pct + "%" : null,
+                         m.risk.trail_pct != null ? "Trail " + m.risk.trail_pct + "%" : null]
+            .filter(Boolean).join(" + ")
+        : "";
+      const slip = m.slippage_bps != null && m.slippage_bps > 0
+        ? " · Slippage " + m.slippage_bps + " bp je Fill" : " · ohne Slippage";
+      const skipped = m.skipped ? " · übersprungen (zu wenig Historie): "
+        + Object.keys(m.skipped).join(", ") : "";
+      return "Zeitraum " + (m.from || "?") + " – " + (m.to || "?")
+        + " · " + (m.symbols || []).length + " Symbole · Strategie " + (m.strategy || "?")
+        + risk + slip
+        + " · Buy & Hold = Pott gleich verteilt und liegen lassen"
+        + " · Beitrag = Gewinnanteil in %-Punkten des Startkapitals" + skipped;
     },
 
     select(r) {

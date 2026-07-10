@@ -18,10 +18,12 @@ Selbstgehostetes Stock-Analyse-Dashboard. Voller Kontext: `docs/PROJEKTPLAN.md`.
   Stunden-Läufe Mo–Fr 10:35–16:35 ET (`bars_1h` + Analyse `1h`, nur fertige
   Kerzen, Macro aus letztem Snapshot). `analysis.timeframe` trennt beide.
 - `worker/backtest.py` — stdlib-only, DB strikt read-only, importiert kein
-  yfinance. Wird vom Web on-demand gespawnt (`list` bzw.
-  `run SYMBOL --strategy … --params … --timeframe 1d|1h --db …`),
-  liefert Signale/Trades/Statistik
-  als JSON auf stdout; Ergebnisse werden nicht persistiert (MemoryCache im Web).
+  yfinance. Wird vom Web on-demand gespawnt (`list`,
+  `run SYMBOL --strategy … --params … --timeframe 1d|1h --db …` bzw.
+  `portfolio [--symbols …]` = Pott-Modell wie trader.py über die Watchlist),
+  liefert Signale/Trades/Statistik als JSON auf stdout; Ergebnisse werden
+  nicht persistiert (MemoryCache im Web). `--slippage-bps` (Default 5 je
+  Fill-Seite, auch für den Buy&Hold-Einstieg) hält die Zahlen ehrlich; 0 = aus.
 - `worker/broker.py` + `worker/trader.py` — Auto-Trading (Alpaca, Default Paper).
   Pott-Modell: Equity / N Auto-Trade-Symbole, all-in/all-out je Symbol nach
   `analysis.signal`. Opt-in via `TRADING_ENABLED=1` + Keys in `.env`;

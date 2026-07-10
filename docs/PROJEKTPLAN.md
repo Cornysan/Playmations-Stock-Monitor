@@ -331,18 +331,33 @@ Code-Editing in der UI — kein Remote-Code-Execution-Risiko):
   (normalisiert BUY/HOLD/SELL). Web darf `strategy_config` schreiben (admin-only) —
   neben `watchlist` die einzige Ausnahme vom Single-Writer-Prinzip.
 - **Backtests:** `worker/backtest.py` (stdlib-only, DB read-only) iteriert `decide()`
-  über die Historie mit simulierter Position. Ausführung zum **Signal-Close**,
-  eine Position all-in/all-out, keine Gebühren; Macro-Säule historisch nicht
+  über die Historie mit simulierter Position. Ausführung Default **next_open**
+  (wie Live), eine Position all-in/all-out; Macro-Säule historisch nicht
   verfügbar (`macro_score=None`). Ergebnis: `signals` (Chart-Marker ▲▼), `trades`,
   `stats` (Rendite, Buy&Hold, Win-Rate, Profit-Faktor, Max Drawdown, Exposure),
   `equity`-Kurve. On-demand vom Web gespawnt (Config `PythonPath`), 1 h MemoryCache,
   nichts persistiert.
+- **Slippage:** `--slippage-bps` (Default 5 = 0,05 % je Fill-Seite) verschlechtert
+  jeden Fill — Käufe teurer, Verkäufe/Stops billiger; der Buy&Hold-Vergleich zahlt
+  seinen Einstiegs-Fill mit. 0 = idealisierte alte Rechnung. UI-Feld „Slip bp".
+- **Portfolio-Backtest:** `backtest.py portfolio [--symbols A,B,…]` (Default:
+  Watchlist aus der DB) simuliert das Pott-Modell aus `trader.py` — ein
+  Cash-Topf, Pott = Equity/N, Buys = min(Pott, Cash), all-in/all-out je Symbol,
+  Ausführung immer next_open, Stops intra-Kerze. Liefert Gesamt-`stats`
+  (inkl. `avg_invested_pct`), `per_symbol`-Beiträge (Prozentpunkte des
+  Startkapitals) und die Portfolio-`equity`-Kurve; Benchmark = Pott gleich
+  verteilt und liegen lassen. Symbole mit < 60 Bars werden übersprungen
+  (`meta.skipped`).
 - **API:** `GET /api/strategies`, `PUT /api/strategies/{name}` (admin; Params +
-  aktiv setzen), `GET /api/symbols/{s}/backtest?strategy=&params=` (Params werden
-  gegen das Schema validiert/geklemmt, bevor sie den Python-Spawn erreichen).
+  aktiv setzen), `GET /api/symbols/{s}/backtest?strategy=&params=&risk=&slippage=`
+  (alles wird gegen Schema/Grenzen validiert, bevor es den Python-Spawn erreicht),
+  `GET /api/portfolio/backtest?strategy=&params=&tf=&risk=&slippage=` (ganze
+  Watchlist, 120-s-Timeout statt 30 s).
 - **UI:** Strategie-Dropdown + Parameter-Inputs überm Chart (Änderung → Backtest neu),
   Buy/Sell-Marker im Chart, Backtest-Accordion mit Statistik-Grid + Trade-Liste.
-  Admin-Buttons „Speichern" / „Aktiv setzen".
+  Admin-Buttons „Speichern" / „Aktiv setzen". Startseite: Accordion
+  „Portfolio-Backtest" (linke Spalte) mit Start-Button — nutzt die aktuell im
+  Detail-Panel eingestellte Strategie-Konfiguration.
 
 ---
 

@@ -89,6 +89,9 @@ function detailState() {
     // Risk-Overlay (leer = aus): wird im Backtest intra-Kerze simuliert und
     // beim Auto-Trade-Lock als echte Alpaca-Stop-Order mit eingefroren.
     risk: { stop_loss_pct: null, trail_pct: null },
+    // Fill-Abschlag in Basispunkten je Seite (Spread + Slippage; 0 = aus).
+    // Leeres Feld = Python-Default (5 bp).
+    slippageBps: 5,
     backtest: null,
     backtestError: null,
     btLoading: false,
@@ -251,6 +254,12 @@ function detailState() {
       return out;
     },
 
+    // Query-Fragment für den Slippage-Wert; leeres Feld → weglassen (Server-Default)
+    slippageQuery() {
+      return typeof this.slippageBps === "number" && this.slippageBps >= 0
+        ? "&slippage=" + encodeURIComponent(this.slippageBps) : "";
+    },
+
     async loadBacktest() {
       if (!this.symbol || !this.stratName) return;
       const requested = this.symbol;
@@ -261,7 +270,8 @@ function detailState() {
         + "?strategy=" + encodeURIComponent(this.stratName)
         + "&tf=" + this.tf
         + "&params=" + encodeURIComponent(JSON.stringify(this.stratParams))
-        + (Object.keys(riskObj).length ? "&risk=" + encodeURIComponent(JSON.stringify(riskObj)) : "");
+        + (Object.keys(riskObj).length ? "&risk=" + encodeURIComponent(JSON.stringify(riskObj)) : "")
+        + this.slippageQuery();
       const resp = await fetch(url);
       if (requested !== this.symbol) return; // Nutzer hat inzwischen gewechselt
       this.btLoading = false;
@@ -303,9 +313,12 @@ function detailState() {
                          m.risk.trail_pct != null ? "Trail " + m.risk.trail_pct + "%" : null]
             .filter(Boolean).join(" + ") + " (intra-Kerze simuliert)"
         : "";
+      const slip = m.slippage_bps != null && m.slippage_bps > 0
+        ? " · Slippage " + m.slippage_bps + " bp je Fill (auch für Buy & Hold-Einstieg)"
+        : " · ohne Gebühren/Slippage";
       return "Zeitraum " + (m.from || "?") + " – " + (m.to || "?") + " · " + tfLabel
-        + " · " + exec + risk
-        + " · ohne Gebühren/Slippage · Macro-Säule im Backtest nicht verfügbar"
+        + " · " + exec + risk + slip
+        + " · Macro-Säule im Backtest nicht verfügbar"
         + " · * = Signal wartet auf Ausführung";
     },
 
