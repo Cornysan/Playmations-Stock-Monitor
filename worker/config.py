@@ -39,6 +39,12 @@ CHUNK_PAUSE_RANGE = (3.0, 7.0)
 # Daily run time (US market close + settle buffer), interpreted in US/Eastern
 DAILY_RUN_ET = os.environ.get("DAILY_RUN_ET", "17:30")
 
+# --- 1h-Timeframe -------------------------------------------------------------
+# Lookback für Stundenkerzen: ~120 Kalendertage ≈ 82 Handelstage ≈ 570 1h-Bars
+# (genug für EMA200-Warmup auf Stundenbasis; Yahoo-Limit für 1h sind 730 Tage).
+LOOKBACK_1H_DAYS = int(os.environ.get("LOOKBACK_1H_DAYS", "120"))
+INCREMENTAL_OVERLAP_HOURS = 24
+
 # --- Auto-Trading (Alpaca) ---------------------------------------------------
 # Ohne TRADING_ENABLED=1 wird NIE gehandelt, egal ob Keys vorhanden sind.
 ALPACA_KEY_ID = os.environ.get("ALPACA_KEY_ID", "")
@@ -46,3 +52,7 @@ ALPACA_SECRET_KEY = os.environ.get("ALPACA_SECRET_KEY", "")
 ALPACA_BASE_URL = os.environ.get("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
 TRADING_ENABLED = os.environ.get("TRADING_ENABLED", "0") == "1"
 MAX_ORDERS_PER_RUN = int(os.environ.get("MAX_ORDERS_PER_RUN", "20"))
+# Welche Signale handeln: "1d" (täglicher Lauf, Default) oder "1h" (Stunden-Läufe
+# während der US-Handelszeiten). Bewusst explizit — Umschalten ändert die
+# Trading-Frequenz fundamental.
+TRADING_TIMEFRAME = os.environ.get("TRADING_TIMEFRAME", "1d")

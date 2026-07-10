@@ -20,6 +20,14 @@ CREATE TABLE IF NOT EXISTS bars (
   PRIMARY KEY (symbol, date)
 );
 
+-- Stundenkerzen (nur reguläre US-Handelszeiten, letzte Tages-Kerze 30 min).
+CREATE TABLE IF NOT EXISTS bars_1h (
+  symbol TEXT NOT NULL,
+  ts     TEXT NOT NULL,                     -- ISO UTC YYYY-MM-DDTHH:MM:SS (Bar-Beginn)
+  open   REAL, high REAL, low REAL, close REAL, volume REAL,
+  PRIMARY KEY (symbol, ts)
+);
+
 CREATE TABLE IF NOT EXISTS analysis (
   symbol          TEXT NOT NULL,
   as_of           TEXT NOT NULL,            -- timestamp of the run
@@ -104,6 +112,8 @@ def _migrate(con: sqlite3.Connection) -> None:
         con.execute("ALTER TABLE analysis ADD COLUMN strategy TEXT")
     if "signal" not in cols:
         con.execute("ALTER TABLE analysis ADD COLUMN signal TEXT")
+    if "timeframe" not in cols:
+        con.execute("ALTER TABLE analysis ADD COLUMN timeframe TEXT NOT NULL DEFAULT '1d'")
     wcols = {r["name"] for r in con.execute("PRAGMA table_info(watchlist)")}
     if "autotrade" not in wcols:
         con.execute("ALTER TABLE watchlist ADD COLUMN autotrade INTEGER NOT NULL DEFAULT 0")
@@ -155,15 +165,42 @@ def closes(con: sqlite3.Connection, symbol: str, limit: int = 320) -> list[float
     return [r["close"] for r in reversed(rows)]
 
 
+# --- bars_1h -----------------------------------------------------------------
+
+def last_bar_ts_1h(con: sqlite3.Connection, symbol: str) -> str | None:
+    row = con.execute("SELECT MAX(ts) t FROM bars_1h WHERE symbol=?", (symbol,)).fetchone()
+    return row["t"]
+
+
+def upsert_bars_1h(con: sqlite3.Connection, symbol: str, rows: list[tuple]) -> int:
+    """rows: list of (ts, open, high, low, close, volume), ts = ISO UTC."""
+    con.executemany(
+        "INSERT OR REPLACE INTO bars_1h(symbol, ts, open, high, low, close, volume) "
+        "VALUES(?,?,?,?,?,?,?)",
+        [(symbol, *r) for r in rows],
+    )
+    con.commit()
+    return len(rows)
+
+
+def closes_1h(con: sqlite3.Connection, symbol: str, limit: int = 320) -> list[float]:
+    rows = con.execute(
+        "SELECT close FROM bars_1h WHERE symbol=? AND close IS NOT NULL "
+        "ORDER BY ts DESC LIMIT ?",
+        (symbol, limit),
+    ).fetchall()
+    return [r["close"] for r in reversed(rows)]
+
+
 # --- analysis / macro ------------------------------------------------------
 
 def write_analysis(con: sqlite3.Connection, symbol: str, as_of: str,
-                   card: dict, strategy: str) -> None:
+                   card: dict, strategy: str, timeframe: str = "1d") -> None:
     """card: flaches Strategie-Ergebnis (Kontrakt siehe strategies/__init__.py)."""
     con.execute(
         "INSERT OR REPLACE INTO analysis(symbol, as_of, trend_score, momentum_score, "
         "macro_score, pillar_total, action, rationale, framing, flags_json, "
-        "indicators_json, strategy, signal) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "indicators_json, strategy, signal, timeframe) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             symbol, as_of,
             card["trend_score"], card["momentum_score"], card["macro_score"],
@@ -171,7 +208,7 @@ def write_analysis(con: sqlite3.Connection, symbol: str, as_of: str,
             card["action"], card["rationale"], card["framing"],
             json.dumps(card["flags"]),
             json.dumps(card["indicators"]),
-            strategy, card["signal"],
+            strategy, card["signal"], timeframe,
         ),
     )
     con.commit()

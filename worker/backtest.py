@@ -7,6 +7,7 @@ funktioniert aber genauso von Hand:
 
   python backtest.py list                                    Strategien + Params-Schema
   python backtest.py run SYMBOL --strategy NAME [--params JSON] [--db PATH]
+                     [--timeframe 1d|1h]
 
 Ausführungsmodell (--execution):
   next_open (Default)  Signal am Close von Bar t → Fill zur Eröffnung von t+1.
@@ -31,14 +32,17 @@ import strategies
 WARMUP = 60  # gleiche Mindesthistorie wie main.analyze_symbols
 
 
-def load_bars(db_path, symbol: str) -> tuple[list[str], list, list[float]]:
+def load_bars(db_path, symbol: str,
+              timeframe: str = "1d") -> tuple[list[str], list, list[float]]:
+    """dates sind ISO-Tage (1d) bzw. ISO-UTC-Datetimes (1h) — beides sortiert
+    lexikographisch korrekt."""
+    sql = ("SELECT ts, open, close FROM bars_1h WHERE symbol=? AND close IS NOT NULL "
+           "ORDER BY ts") if timeframe == "1h" else \
+          ("SELECT date, open, close FROM bars WHERE symbol=? AND close IS NOT NULL "
+           "ORDER BY date")
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     try:
-        rows = con.execute(
-            "SELECT date, open, close FROM bars WHERE symbol=? AND close IS NOT NULL "
-            "ORDER BY date",
-            (symbol,),
-        ).fetchall()
+        rows = con.execute(sql, (symbol,)).fetchall()
     finally:
         con.close()
     return [r[0] for r in rows], [r[1] for r in rows], [r[2] for r in rows]
@@ -171,7 +175,7 @@ def cmd_run(args) -> int:
         return 1
 
     symbol = args.symbol.upper()
-    dates, opens, closes = load_bars(args.db or config.DB_PATH, symbol)
+    dates, opens, closes = load_bars(args.db or config.DB_PATH, symbol, args.timeframe)
     if len(closes) <= WARMUP:
         print(json.dumps({"error": f"zu wenig Bars für {symbol} "
                                    f"({len(closes)}, benötigt >{WARMUP})"}))
@@ -187,6 +191,7 @@ def cmd_run(args) -> int:
         "to": dates[-1],
         "n_bars": len(closes),
         "execution": args.execution,
+        "timeframe": args.timeframe,
         "macro": None,
     }
     print(json.dumps(result, ensure_ascii=False))
@@ -203,6 +208,8 @@ def main() -> int:
     run_p.add_argument("--params", help="JSON-Objekt mit Param-Overrides")
     run_p.add_argument("--execution", choices=["next_open", "close"],
                        default="next_open")
+    run_p.add_argument("--timeframe", choices=["1d", "1h"], default="1d",
+                       help="1h testet auf Stundenkerzen (Tabelle bars_1h)")
     run_p.add_argument("--db", help="Pfad zur SQLite-DB (Default: config.DB_PATH)")
     args = ap.parse_args()
 

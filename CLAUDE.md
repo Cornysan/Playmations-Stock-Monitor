@@ -10,15 +10,22 @@ Selbstgehostetes Stock-Analyse-Dashboard. Voller Kontext: `docs/PROJEKTPLAN.md`.
   nach `data/stocks.db` (SQLite, WAL). Einziger Schreiber für Analyse-Tabellen.
   Signale kommen aus austauschbaren Plugins in `worker/strategies/` (Kontrakt:
   dortiges `__init__.py`; Default `three_pillars` wrappt score.py). Die via
-  `strategy_config`-Tabelle aktive Strategie steuert den täglichen Run.
+  `strategy_config`-Tabelle aktive Strategie steuert alle Runs.
+  Zwei Timeframes: Tagesrun nach US-Close (Macro + `bars` + Analyse `1d`) und
+  Stunden-Läufe Mo–Fr 10:35–16:35 ET (`bars_1h` + Analyse `1h`, nur fertige
+  Kerzen, Macro aus letztem Snapshot). `analysis.timeframe` trennt beide.
 - `worker/backtest.py` — stdlib-only, DB strikt read-only, importiert kein
   yfinance. Wird vom Web on-demand gespawnt (`list` bzw.
-  `run SYMBOL --strategy … --params … --db …`), liefert Signale/Trades/Statistik
+  `run SYMBOL --strategy … --params … --timeframe 1d|1h --db …`),
+  liefert Signale/Trades/Statistik
   als JSON auf stdout; Ergebnisse werden nicht persistiert (MemoryCache im Web).
 - `worker/broker.py` + `worker/trader.py` — Auto-Trading (Alpaca, Default Paper).
   Pott-Modell: Equity / N Auto-Trade-Symbole, all-in/all-out je Symbol nach
-  `analysis.signal`. Opt-in via `TRADING_ENABLED=1` + Keys in `.env`; Idempotenz
-  über `client_order_id` (Tabellen `orders`, `broker_snapshot`). `holding` der
+  `analysis.signal`. Opt-in via `TRADING_ENABLED=1` + Keys in `.env`;
+  `TRADING_TIMEFRAME` (1d Default / 1h) bestimmt, ob der Tagesrun oder die
+  Stunden-Läufe handeln. Idempotenz über `client_order_id` (Fenster = Tag bzw.
+  UTC-Stunde; Tabellen `orders`, `broker_snapshot`); PDT-Schutz blockt
+  Same-Day-Roundtrips auf Live-Konten < 25k USD. `holding` der
   Auto-Trade-Symbole wird aus echten Alpaca-Positionen gesynct.
 - `web/` — ASP.NET Core (.NET 10) Minimal-API + statisches Frontend
   (`wwwroot/`, Alpine.js + Lightweight Charts v5, vendored). Liest die DB;

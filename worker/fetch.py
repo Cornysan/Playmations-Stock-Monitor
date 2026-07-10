@@ -93,6 +93,64 @@ def download_bars(symbols: list[str], start: dt.date) -> dict[str, list[tuple]]:
     return out
 
 
+def download_bars_1h(symbols: list[str], start: dt.datetime) -> dict[str, list[tuple]]:
+    """Batch-download hourly bars since `start` (aware datetime).
+
+    Returns {symbol: [(ts_iso_utc, open, high, low, close, volume), ...]} old→new.
+    Die angebrochene aktuelle Stunde wird verworfen — Signale entstehen nur auf
+    fertigen Kerzen (die 15:30-ET-Kerze gilt daher erst ab 16:30 ET als fertig).
+    """
+    out: dict[str, list[tuple]] = {}
+    now_utc = dt.datetime.now(dt.timezone.utc)
+    chunks = list(_chunks(symbols, config.CHUNK_SIZE))
+    for idx, chunk in enumerate(chunks):
+        log.info("downloading 1h chunk %d/%d (%d symbols, start=%s)",
+                 idx + 1, len(chunks), len(chunk), start.isoformat(timespec="minutes"))
+        try:
+            df = yf.download(
+                chunk,
+                start=start,
+                interval="1h",
+                auto_adjust=True,
+                group_by="ticker",
+                threads=False,
+                progress=False,
+            )
+        except Exception as e:
+            if "429" in str(e) or "rate" in str(e).lower():
+                raise RateLimited(str(e)) from e
+            log.error("1h chunk download failed: %s", e)
+            continue
+        if df is None or df.empty:
+            log.warning("1h chunk returned no data")
+            continue
+
+        for sym in chunk:
+            try:
+                sub = df[sym] if df.columns.nlevels > 1 else df
+            except KeyError:
+                continue
+            sub = sub.dropna(subset=["Close"])
+            rows = []
+            for ts, row in sub.iterrows():
+                ts_utc = ts.tz_convert("UTC")
+                if ts_utc + dt.timedelta(hours=1) > now_utc:
+                    continue  # Kerze läuft noch
+                rows.append((
+                    ts_utc.strftime("%Y-%m-%dT%H:%M:%S"),
+                    _clean(row.get("Open")), _clean(row.get("High")),
+                    _clean(row.get("Low")), _clean(row.get("Close")),
+                    _clean(row.get("Volume")),
+                ))
+            if rows:
+                out[sym] = rows
+
+        if idx < len(chunks) - 1:
+            pause = random.uniform(*config.CHUNK_PAUSE_RANGE)
+            time.sleep(pause)
+    return out
+
+
 def fred_yield_spread(api_key: str, days: int = 150) -> list[float] | None:
     """10Y-2Y spread series (old→new) from FRED T10Y2Y. None if unavailable."""
     if not api_key:

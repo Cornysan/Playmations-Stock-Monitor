@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Symbol · stocks.playmations.com</title>
-  <link rel="stylesheet" href="/css/app.css?v=5">
-  <script src="/js/app.js?v=5"></script>
+  <link rel="stylesheet" href="/css/app.css?v=6">
+  <script src="/js/app.js?v=6"></script>
   <script src="/js/lightweight-charts.standalone.production.js"></script>
   <script defer src="/js/alpine.min.js"></script>
   <script>
@@ -46,7 +46,8 @@
             title="Auto-Trade: Worker kauft/verkauft dieses Symbol automatisch nach Signal (Paper-Account)"></button>
     <span x-show="admin" x-text="analysis?.autotrade ? 'Auto-Trade an' : 'Auto-Trade aus'"></span>
     <span class="stale" x-show="analysis"
-          x-text="'· Analyse vom ' + fmtAsOf(analysis?.as_of) + (analysis?.strategy ? ' · ' + analysis.strategy : '')"></span>
+          x-text="'· Analyse vom ' + fmtAsOf(analysis?.as_of) + (analysis?.strategy ? ' · ' + analysis.strategy : '')
+                + (analysis?.timeframe === '1h' ? ' · 1h-Signal' : '')"></span>
   </div>
 
   <!-- Action banner -->
@@ -85,7 +86,12 @@
               title="Diese Strategie (mit diesen Parametern) für den täglichen Lauf aktivieren">Aktiv setzen</button>
     </div>
     <div class="chart-toolbar">
-      <template x-for="r in ['3m','6m','1y']" :key="r">
+      <button class="range-btn" :class="{ active: tf === '1d' }" @click="setTf('1d')"
+              title="Tageskerzen">D</button>
+      <button class="range-btn" :class="{ active: tf === '1h' }" @click="setTf('1h')"
+              title="Stundenkerzen (US-Handelszeiten)">1H</button>
+      <span class="tf-sep"></span>
+      <template x-for="r in tfRanges()" :key="tf + r">
         <button class="range-btn" :class="{ active: range === r }"
                 @click="range = r; loadChart()" x-text="r.toUpperCase()"></button>
       </template>

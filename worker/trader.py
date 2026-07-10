@@ -12,9 +12,14 @@ Ablauf pro Tagesrun (main.run_once):
   trade(con, as_of)  NACH der Analyse: BUY im Flat → Notional-Kauf (Pott),
                      SELL in Position → Market-Sell der ganzen Position.
 
+TRADING_TIMEFRAME steuert, welche Läufe handeln: "1d" → der Tagesrun auf
+Tagessignalen (Default), "1h" → die Stunden-Läufe auf 1h-Signalen (trade()
+bekommt dann timeframe="1h" und stündliche Idempotenz-Fenster).
+
 Sicherungen: TRADING_ENABLED-Opt-in, client_order_id-Idempotenz (pro Symbol,
-Tag und Seite), MAX_ORDERS_PER_RUN-Circuit-Breaker, Fehler einzelner Orders
-brechen weder den Run noch die restlichen Orders.
+Run-Fenster und Seite), MAX_ORDERS_PER_RUN-Circuit-Breaker, PDT-Schutz auf
+Live-Konten < 25k USD, Fehler einzelner Orders brechen weder den Run noch die
+restlichen Orders.
 """
 from __future__ import annotations
 import datetime as dt
@@ -92,7 +97,21 @@ def sync(con) -> None:
 # Phase 2: trade (nach der Analyse)
 # ---------------------------------------------------------------------------
 
-def trade(con, as_of: str) -> None:
+def _pdt_blocked(con, symbol: str, day: str, equity: float) -> bool:
+    """Pattern-Day-Trader-Schutz: Auf einem LIVE-Konto unter 25.000 USD Equity
+    keinen Verkauf platzieren, wenn das Symbol heute schon gekauft wurde —
+    jeder Same-Day-Roundtrip zählt als Daytrade und kann das Konto sperren.
+    Paper-Accounts sind nicht betroffen."""
+    if "paper" in config.ALPACA_BASE_URL or equity >= 25_000:
+        return False
+    iso_day = f"{day[:4]}-{day[4:6]}-{day[6:8]}"
+    row = con.execute(
+        "SELECT 1 FROM orders WHERE symbol=? AND side='buy' AND status='filled' "
+        "AND substr(COALESCE(filled_at, submitted_at), 1, 10)=? LIMIT 1",
+        (symbol, iso_day)).fetchone()
+    return row is not None
+
+def trade(con, as_of: str, timeframe: str = "1d") -> None:
     symbols = db.autotrade_symbols(con)
     if not symbols:
         log.info("no autotrade symbols — nothing to do")
@@ -106,13 +125,18 @@ def trade(con, as_of: str) -> None:
     pot = acct["equity"] / len(symbols)
     cash = acct["cash"]
     day = as_of[:10].replace("-", "")
-    log.info("trade: %d symbols, pot=%.2f (equity %.2f / %d), cash=%.2f",
-             len(symbols), pot, acct["equity"], len(symbols), cash)
+    # 1h-Läufe handeln mehrmals täglich → Idempotenz-Fenster ist der Run
+    # (UTC-Stunde), nicht der Tag; sonst wäre z. B. ein Re-Entry nach einem
+    # Vormittags-Verkauf für den Rest des Tages blockiert.
+    run_key = day if timeframe == "1d" else f"{day}T{as_of[11:13]}"
+    log.info("trade[%s]: %d symbols, pot=%.2f (equity %.2f / %d), cash=%.2f",
+             timeframe, len(symbols), pot, acct["equity"], len(symbols), cash)
 
     placeholders = ",".join("?" * len(symbols))
     signals = {r["symbol"]: r["signal"] for r in con.execute(
-        f"SELECT symbol, signal FROM analysis WHERE as_of=? AND symbol IN ({placeholders})",
-        (as_of, *symbols))}
+        f"SELECT symbol, signal FROM analysis WHERE as_of=? AND timeframe=? "
+        f"AND symbol IN ({placeholders})",
+        (as_of, timeframe, *symbols))}
 
     n_orders = 0
     for sym in symbols:
@@ -126,7 +150,7 @@ def trade(con, as_of: str) -> None:
             break
 
         if sig == "BUY" and sym not in positions:
-            cid = f"spm-{sym}-{day}-buy"
+            cid = f"spm-{sym}-{run_key}-buy"
             if db.order_exists(con, cid):
                 log.info("%s: buy already submitted today (%s)", sym, cid)
                 continue
@@ -150,9 +174,13 @@ def trade(con, as_of: str) -> None:
                 log.error("%s: buy failed: %s", sym, e)
 
         elif sig == "SELL" and sym in positions:
-            cid = f"spm-{sym}-{day}-sell"
+            cid = f"spm-{sym}-{run_key}-sell"
             if db.order_exists(con, cid):
-                log.info("%s: sell already submitted today (%s)", sym, cid)
+                log.info("%s: sell already submitted this run window (%s)", sym, cid)
+                continue
+            if _pdt_blocked(con, sym, day, acct["equity"]):
+                log.warning("%s: sell skipped — Same-Day-Roundtrip auf Live-Konto "
+                            "< 25k USD (Pattern-Day-Trader-Schutz)", sym)
                 continue
             qty = positions[sym]["qty_raw"]
             try:

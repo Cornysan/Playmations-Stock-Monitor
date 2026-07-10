@@ -297,8 +297,9 @@ app.MapGet("/api/watchlist", () =>
                (SELECT date  FROM bars b WHERE b.symbol = w.symbol ORDER BY date DESC LIMIT 1) AS last_date,
                (SELECT close FROM bars b WHERE b.symbol = w.symbol ORDER BY date DESC LIMIT 1 OFFSET 1) AS prev_price
         FROM watchlist w
-        LEFT JOIN analysis a ON a.symbol = w.symbol
-            AND a.as_of = (SELECT MAX(as_of) FROM analysis WHERE symbol = w.symbol)
+        LEFT JOIN analysis a ON a.symbol = w.symbol AND a.timeframe = '1d'
+            AND a.as_of = (SELECT MAX(as_of) FROM analysis
+                           WHERE symbol = w.symbol AND timeframe = '1d')
         WHERE w.enabled = 1
         ORDER BY w.symbol
         """);
@@ -313,11 +314,22 @@ app.MapGet("/api/watchlist", () =>
     return Results.Json(rows);
 });
 
-app.MapGet("/api/symbols/{symbol}/bars", (string symbol, string? range) =>
+app.MapGet("/api/symbols/{symbol}/bars", (string symbol, string? range, string? tf) =>
 {
+    var is1h = tf == "1h";
+    // 1h-Zeiten sind ISO-UTC-Datetimes — Lightweight Charts erwartet für
+    // Intraday-Daten Unix-Sekunden statt "yyyy-MM-dd"-Strings.
+    long ToEpoch(string ts) => new DateTimeOffset(DateTime.ParseExact(
+        ts, "yyyy-MM-dd'T'HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture,
+        System.Globalization.DateTimeStyles.AssumeUniversal |
+        System.Globalization.DateTimeStyles.AdjustToUniversal)).ToUnixTimeSeconds();
+
     var rows = Query(
-        "SELECT date, open, high, low, close, volume FROM bars " +
-        "WHERE symbol = @s AND close IS NOT NULL ORDER BY date",
+        is1h
+            ? "SELECT ts AS date, open, high, low, close, volume FROM bars_1h " +
+              "WHERE symbol = @s AND close IS NOT NULL ORDER BY ts"
+            : "SELECT date, open, high, low, close, volume FROM bars " +
+              "WHERE symbol = @s AND close IS NOT NULL ORDER BY date",
         ("@s", symbol.ToUpperInvariant()));
     if (rows.Count == 0) return Results.NotFound(new { error = "no bars for symbol" });
 
@@ -328,11 +340,15 @@ app.MapGet("/api/symbols/{symbol}/bars", (string symbol, string? range) =>
 
     // EMAs are computed over the full cached history, then cut to the range,
     // so overlays are already correct at the left edge of the chart.
+    // (Datums-Cutoff vergleicht auch gegen "yyyy-MM-ddTHH:mm:ss" korrekt ordinal.)
     var cutoff = (range?.ToLowerInvariant()) switch
     {
+        "5d" => DateTime.UtcNow.AddDays(-5).ToString("yyyy-MM-dd"),
+        "2w" => DateTime.UtcNow.AddDays(-14).ToString("yyyy-MM-dd"),
+        "1m" => DateTime.UtcNow.AddMonths(-1).ToString("yyyy-MM-dd"),
         "3m" => DateTime.UtcNow.AddMonths(-3).ToString("yyyy-MM-dd"),
         "6m" => DateTime.UtcNow.AddMonths(-6).ToString("yyyy-MM-dd"),
-        _ => "0000", // default: everything we cache (~1 year)
+        _ => "0000", // default: everything we cache
     };
 
     var bars = new List<object>();
@@ -343,27 +359,28 @@ app.MapGet("/api/symbols/{symbol}/bars", (string symbol, string? range) =>
     {
         var date = (string)rows[i]["date"]!;
         if (string.CompareOrdinal(date, cutoff) < 0) continue;
+        object time = is1h ? ToEpoch(date) : date;
         bars.Add(new
         {
-            time = date,
+            time,
             open = rows[i]["open"], high = rows[i]["high"],
             low = rows[i]["low"], close = rows[i]["close"],
             volume = rows[i]["volume"],
         });
-        if (e20[i] is double v20) ema20.Add(new { time = date, value = Math.Round(v20, 4) });
-        if (e50[i] is double v50) ema50.Add(new { time = date, value = Math.Round(v50, 4) });
-        if (e200[i] is double v200) ema200.Add(new { time = date, value = Math.Round(v200, 4) });
+        if (e20[i] is double v20) ema20.Add(new { time, value = Math.Round(v20, 4) });
+        if (e50[i] is double v50) ema50.Add(new { time, value = Math.Round(v50, 4) });
+        if (e200[i] is double v200) ema200.Add(new { time, value = Math.Round(v200, 4) });
     }
-    return Results.Json(new { symbol = symbol.ToUpperInvariant(), bars, ema20, ema50, ema200 });
+    return Results.Json(new { symbol = symbol.ToUpperInvariant(), timeframe = is1h ? "1h" : "1d", bars, ema20, ema50, ema200 });
 });
 
-app.MapGet("/api/symbols/{symbol}/analysis", (string symbol) =>
+app.MapGet("/api/symbols/{symbol}/analysis", (string symbol, string? tf) =>
 {
     var rows = Query("""
         SELECT a.*, w.name, w.holding, w.autotrade FROM analysis a
         LEFT JOIN watchlist w ON w.symbol = a.symbol
-        WHERE a.symbol = @s ORDER BY a.as_of DESC LIMIT 1
-        """, ("@s", symbol.ToUpperInvariant()));
+        WHERE a.symbol = @s AND a.timeframe = @tf ORDER BY a.as_of DESC LIMIT 1
+        """, ("@s", symbol.ToUpperInvariant()), ("@tf", tf == "1h" ? "1h" : "1d"));
     if (rows.Count == 0) return Results.NotFound(new { error = "no analysis yet" });
     var row = rows[0];
     row["flags"] = ParseJson(row["flags_json"]);
@@ -480,9 +497,10 @@ app.MapPut("/api/strategies/{name}", async (string name, HttpRequest request) =>
     return Results.Json(new { name, saved = paramsJson is not null, active = activeVal == 1 });
 });
 
-app.MapGet("/api/symbols/{symbol}/backtest", async (string symbol, string? strategy, string? @params) =>
+app.MapGet("/api/symbols/{symbol}/backtest", async (string symbol, string? strategy, string? @params, string? tf) =>
 {
     symbol = symbol.ToUpperInvariant();
+    var timeframe = tf == "1h" ? "1h" : "1d";
     var catalog = await StrategyCatalog();
     if (catalog is null)
         return Results.Json(new { error = "Backtest nicht verfügbar (PythonPath prüfen)" }, statusCode: 503);
@@ -501,18 +519,21 @@ app.MapGet("/api/symbols/{symbol}/backtest", async (string symbol, string? strat
         return Results.BadRequest(new { error = "params: nur numerische Werte erlaubt" });
     var canonical = JsonSerializer.Serialize(validated);
 
-    var last = Query("SELECT MAX(date) d FROM bars WHERE symbol = @s AND close IS NOT NULL",
+    var last = Query(timeframe == "1h"
+            ? "SELECT MAX(ts) d FROM bars_1h WHERE symbol = @s AND close IS NOT NULL"
+            : "SELECT MAX(date) d FROM bars WHERE symbol = @s AND close IS NOT NULL",
         ("@s", symbol));
     if (last.Count == 0 || last[0]["d"] is not string lastDate)
         return Results.NotFound(new { error = "no bars for symbol" });
 
     var cache = app.Services.GetRequiredService<IMemoryCache>();
-    var key = $"bt:{symbol}:{strategy}:{canonical}:{lastDate}";
+    var key = $"bt:{symbol}:{strategy}:{canonical}:{timeframe}:{lastDate}";
     if (cache.TryGetValue(key, out string? cached) && cached is not null)
         return Results.Content(cached, "application/json");
 
     var (code, stdout, stderr) = await RunPython("run", symbol,
-        "--strategy", strategy, "--params", canonical, "--db", dbPath);
+        "--strategy", strategy, "--params", canonical, "--timeframe", timeframe,
+        "--db", dbPath);
     if (code != 0)
     {
         app.Logger.LogError("Backtest {Symbol}/{Strategy} fehlgeschlagen ({Code}): {Err}",

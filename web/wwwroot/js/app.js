@@ -76,6 +76,7 @@ function detailState() {
     analysis: null,
     analysisMissing: false,
     lastClose: null,
+    tf: "1d",           // Timeframe: "1d" (Tageskerzen) oder "1h" (Stundenkerzen)
     range: "1y",
     chart: null,
     series: null,
@@ -102,14 +103,39 @@ function detailState() {
       await this.loadBacktest();
     },
 
+    // Range-Buttons je Timeframe; beim Umschalten wird alles neu geladen,
+    // was vom Timeframe abhängt (Chart, Analyse-Banner, Backtest).
+    tfRanges() {
+      return this.tf === "1h" ? ["5d", "2w", "1m", "3m"] : ["3m", "6m", "1y"];
+    },
+    async setTf(t) {
+      if (t === this.tf) return;
+      this.tf = t;
+      this.range = t === "1h" ? "1m" : "1y";
+      this.analysis = null;
+      this.analysisMissing = false;
+      this.backtest = null;
+      this.backtestError = null;
+      this.applyMarkers();
+      await Promise.all([this.loadAnalysis(), this.loadChart()]);
+      await this.loadBacktest();
+    },
+
+    // Chart-Zeitwert eines Backtest-Datums: 1d nutzt "YYYY-MM-DD"-Strings,
+    // 1h Unix-Sekunden (Backtest liefert ISO-UTC-Datetimes).
+    chartTime(d) {
+      return d.includes("T") ? Math.floor(Date.parse(d + "Z") / 1000) : d;
+    },
+
     async loadAnalysis() {
-      const resp = await fetch("/api/symbols/" + encodeURIComponent(this.symbol) + "/analysis");
+      const resp = await fetch("/api/symbols/" + encodeURIComponent(this.symbol) + "/analysis?tf=" + this.tf);
       if (resp.ok) this.analysis = await resp.json();
       else this.analysisMissing = true;
     },
 
     async loadChart() {
-      const resp = await fetch("/api/symbols/" + encodeURIComponent(this.symbol) + "/bars?range=" + this.range);
+      const resp = await fetch("/api/symbols/" + encodeURIComponent(this.symbol)
+        + "/bars?range=" + this.range + "&tf=" + this.tf);
       if (!resp.ok) { this.clearChart(); return; }
       const data = await resp.json();
       this.lastClose = data.bars.length ? data.bars[data.bars.length - 1].close : null;
@@ -162,6 +188,11 @@ function detailState() {
         this.chart.priceScale("volume").applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
         this.markersApi = LWC.createSeriesMarkers(this.series.candles, []);
       }
+      // Intraday-Bars kommen als Unix-Sekunden → Uhrzeit auf der Achse zeigen
+      this.chart.timeScale().applyOptions({
+        timeVisible: data.timeframe === "1h",
+        secondsVisible: false,
+      });
       this.series.candles.setData(data.bars);
       this.series.volume.setData(data.bars.map((b) => ({
         time: b.time, value: b.volume ?? 0,
@@ -206,6 +237,7 @@ function detailState() {
       this.backtestError = null;
       const url = "/api/symbols/" + encodeURIComponent(requested) + "/backtest"
         + "?strategy=" + encodeURIComponent(this.stratName)
+        + "&tf=" + this.tf
         + "&params=" + encodeURIComponent(JSON.stringify(this.stratParams));
       const resp = await fetch(url);
       if (requested !== this.symbol) return; // Nutzer hat inzwischen gewechselt
@@ -223,9 +255,11 @@ function detailState() {
     applyMarkers() {
       if (!this.markersApi) return;
       const first = this.firstBarTime;
-      const sigs = (this.backtest?.signals || []).filter((s) => !first || s.date >= first);
+      const sigs = (this.backtest?.signals || [])
+        .map((s) => ({ ...s, time: this.chartTime(s.date) }))
+        .filter((s) => !first || s.time >= first);
       this.markersApi.setMarkers(sigs.map((s) => ({
-        time: s.date,
+        time: s.time,
         position: s.type === "buy" ? "belowBar" : "aboveBar",
         color: s.type === "buy" ? "#26a69a" : "#ef5350",
         shape: s.type === "buy" ? "arrowUp" : "arrowDown",
@@ -238,7 +272,9 @@ function detailState() {
       const m = this.backtest?.meta || {};
       const exec = m.execution === "close"
         ? "Ausführung zum Signal-Close" : "Ausführung zur nächsten Eröffnung (wie Live-Trading)";
-      return "Zeitraum " + (m.from || "?") + " – " + (m.to || "?") + " · " + exec
+      const tfLabel = m.timeframe === "1h" ? "Stundenkerzen" : "Tageskerzen";
+      return "Zeitraum " + (m.from || "?") + " – " + (m.to || "?") + " · " + tfLabel
+        + " · " + exec
         + " · ohne Gebühren/Slippage · Macro-Säule im Backtest nicht verfügbar"
         + " · * = Signal wartet auf Ausführung";
     },
